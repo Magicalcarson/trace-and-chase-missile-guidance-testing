@@ -85,6 +85,45 @@ WEAVE_FREQUENCY = 0.3  # Hz
 WEAVE_AMPLITUDE = 400.0  # meters
 
 # ============================================================================
+# MULTI-MISSILE SETTINGS
+# ============================================================================
+# Enable multiple missiles
+ENABLE_MULTI_MISSILE = True
+NUM_MISSILES = 3  # Number of missiles to launch
+
+# Missile launch configuration
+# Each missile can have: start_position, launch_time, guidance_algorithm
+MISSILE_CONFIGS = [
+    {
+        "start_pos": np.array([13000, 12000, 0]),
+        "launch_time": 0.0,
+        "guidance": "proportional_navigation",
+        "color": "red"
+    },
+    {
+        "start_pos": np.array([15000, 8000, 2000]),
+        "launch_time": 2.0,
+        "guidance": "lead_pursuit",
+        "color": "orange"
+    },
+    {
+        "start_pos": np.array([10000, 15000, -1000]),
+        "launch_time": 4.0,
+        "guidance": "augmented_pn",
+        "color": "magenta"
+    },
+]
+
+# Salvo mode: launch all missiles at intervals
+SALVO_MODE = False
+SALVO_INTERVAL = 1.0  # seconds between each launch in salvo
+
+# Target assignment for multiple missiles
+# "single" - all missiles target the same aircraft
+# "distributed" - missiles are assigned to different targets (if multiple targets exist)
+TARGET_ASSIGNMENT = "single"
+
+# ============================================================================
 # Variables
 # ============================================================================
 Straight_time = 25      # Duration of first straight segment (s)
@@ -807,158 +846,232 @@ else:
     print(f"\nEvasion disabled")
 
 # ============================================================================
-# COUPLED SIMULATION (Target with evasion + Missile)
+# COUPLED SIMULATION (Target with evasion + Multiple Missiles)
 # ============================================================================
-# Initialize arrays
+
+# Determine number of missiles
+if ENABLE_MULTI_MISSILE:
+    num_missiles = min(NUM_MISSILES, len(MISSILE_CONFIGS))
+    print(f"\nMulti-missile mode: {num_missiles} missiles")
+else:
+    num_missiles = 1
+
+# Initialize target arrays
 target_states = np.zeros((n_points, 3))
 target_velocities = np.zeros((n_points, 3))
 target_accelerations = np.zeros((n_points, 3))
-missile_states = np.zeros((n_points, 3))
-missile_velocities = np.zeros((n_points, 3))
-missile_speeds = np.zeros(n_points)
 
-# Initial conditions
+# Initialize missile arrays (now supporting multiple missiles)
+all_missile_states = np.zeros((num_missiles, n_points, 3))
+all_missile_velocities = np.zeros((num_missiles, n_points, 3))
+all_missile_speeds = np.zeros((num_missiles, n_points))
+
+# Missile state tracking for each missile
+missile_launched = [False] * num_missiles
+missile_launch_indices = [0] * num_missiles
+intercept_times = [None] * num_missiles
+intercept_indices = [None] * num_missiles
+intercepted = [False] * num_missiles
+missile_dead = [False] * num_missiles
+missile_dead_times = [None] * num_missiles
+prev_los_list = [None] * num_missiles
+guidance_funcs = []
+
+# Initialize each missile
+for m in range(num_missiles):
+    if ENABLE_MULTI_MISSILE:
+        config = MISSILE_CONFIGS[m]
+        start_pos = config["start_pos"]
+        guidance_name = config["guidance"]
+    else:
+        start_pos = missile_start_loc
+        guidance_name = GUIDANCE_ALGORITHM
+
+    all_missile_states[m, 0] = start_pos
+    guidance_funcs.append(get_guidance_function(guidance_name))
+
+    # Initial velocity pointing toward target
+    initial_direction = base_target_states[0] - start_pos
+    if np.linalg.norm(initial_direction) > 0:
+        initial_direction = initial_direction / np.linalg.norm(initial_direction)
+    else:
+        initial_direction = np.array([1, 0, 0])
+    all_missile_velocities[m, 0] = initial_direction * miss_vel
+    all_missile_speeds[m, 0] = miss_vel
+
+    if ENABLE_MULTI_MISSILE:
+        print(f"  Missile {m+1}: {guidance_name} from {start_pos}")
+
+# Initial target conditions
 target_states[0] = base_target_states[0]
 target_velocities[0] = base_target_velocities[0]
-missile_states[0] = missile_start_loc
 
-# Initial missile velocity (pointing toward target)
-initial_direction = target_states[0] - missile_start_loc
-initial_direction = initial_direction / np.linalg.norm(initial_direction)
-missile_velocities[0] = initial_direction * miss_vel
-missile_speeds[0] = miss_vel
-
-# Simulation state
-missile_launched = False
-missile_launch_index = 0
-intercept_time = None
-intercept_index = None
-intercepted = False
-missile_dead = False
-missile_dead_time = None
-prev_los = None
+# Evasion state
 evasion_started = False
 evasion_start_time = None
+any_intercepted = False
 
-# Get the selected guidance function
-guidance_func = get_guidance_function(GUIDANCE_ALGORITHM)
+# For backwards compatibility - create single missile reference
+missile_states = all_missile_states[0]
+missile_velocities = all_missile_velocities[0]
+missile_speeds = all_missile_speeds[0]
 
 for i in range(1, n_points):
     t = times[i]
 
     # ========== TARGET UPDATE ==========
-    # Get base trajectory position and velocity
     base_pos = base_target_states[i]
     base_vel = base_target_velocities[i]
 
-    # Check if evasion should start
-    if ENABLE_EVASION and EVASION_PATTERN != "none" and missile_launched and not intercepted:
-        distance_to_missile = np.linalg.norm(base_pos - missile_states[i-1])
-        if distance_to_missile <= EVASION_START_DISTANCE and not evasion_started:
+    # Check if evasion should start (based on closest missile)
+    if ENABLE_EVASION and EVASION_PATTERN != "none" and not any_intercepted:
+        min_distance = float('inf')
+        closest_missile_pos = None
+        for m in range(num_missiles):
+            if missile_launched[m] and not intercepted[m]:
+                dist = np.linalg.norm(base_pos - all_missile_states[m, i-1])
+                if dist < min_distance:
+                    min_distance = dist
+                    closest_missile_pos = all_missile_states[m, i-1]
+
+        if closest_missile_pos is not None and min_distance <= EVASION_START_DISTANCE and not evasion_started:
             evasion_started = True
             evasion_start_time = t
-            print(f"Evasion started at t = {t:.2f}s (missile at {distance_to_missile:.0f}m)")
+            print(f"Evasion started at t = {t:.2f}s (closest missile at {min_distance:.0f}m)")
 
     # Calculate evasion offset
-    if evasion_started:
+    if evasion_started and closest_missile_pos is not None:
         evasion_offset = calculate_evasion_offset(
-            t, base_pos, base_vel, missile_states[i-1], evasion_start_time
+            t, base_pos, base_vel, closest_missile_pos, evasion_start_time
         )
     else:
         evasion_offset = np.zeros(3)
 
     # Apply evasion to target position
     target_states[i] = base_pos + evasion_offset
-
-    # Calculate actual velocity (includes evasion motion)
     target_velocities[i] = (target_states[i] - target_states[i-1]) / dt
 
-    # Calculate acceleration
     if i > 1:
         target_accelerations[i] = (target_velocities[i] - target_velocities[i-1]) / dt
     else:
         target_accelerations[i] = np.zeros(3)
 
-    # ========== MISSILE UPDATE ==========
-    # Check if missile should launch
-    if t >= missile_launch_time and not missile_launched:
-        missile_launched = True
-        missile_launch_index = i
-        print(f"Missile launched at t = {t:.2f}s")
-
-    if missile_launched:
-        # Missile holds position after intercept or death
-        if intercepted or missile_dead:
-            missile_states[i] = missile_states[i-1]
-            missile_velocities[i] = missile_velocities[i-1]
-            missile_speeds[i] = missile_speeds[i-1]
-            continue
-
-        # Get target info for this timestep
-        target_pos = target_states[i]
-        target_vel = target_velocities[i]
-        target_accel = target_accelerations[i]
-
-        # Check for intercept first
-        distance = np.linalg.norm(target_pos - missile_states[i-1])
-        if distance < kill_dist and intercept_time is None:
-            intercept_time = t
-            intercept_index = i
-            intercepted = True
-            print(f"Intercept at t = {t:.2f}s, distance = {distance:.1f}m")
-            missile_states[i] = missile_states[i-1]
-            missile_velocities[i] = missile_velocities[i-1]
-            missile_speeds[i] = missile_speeds[i-1]
-            continue
-
-        # Apply selected guidance algorithm to get desired direction
-        if GUIDANCE_ALGORITHM == "augmented_pn":
-            guided_pos, prev_los = augmented_pn_guidance(
-                missile_states[i-1], target_pos, target_vel,
-                miss_vel, dt, prev_los, target_accel
-            )
+    # ========== MISSILES UPDATE ==========
+    for m in range(num_missiles):
+        # Get launch time for this missile
+        if ENABLE_MULTI_MISSILE:
+            launch_time = MISSILE_CONFIGS[m]["launch_time"]
+            if SALVO_MODE:
+                launch_time = missile_launch_time + m * SALVO_INTERVAL
         else:
-            guided_pos, prev_los = guidance_func(
-                missile_states[i-1], target_pos, target_vel,
-                miss_vel, dt, prev_los
+            launch_time = missile_launch_time
+
+        # Check if missile should launch
+        if t >= launch_time and not missile_launched[m]:
+            missile_launched[m] = True
+            missile_launch_indices[m] = i
+            if ENABLE_MULTI_MISSILE:
+                print(f"Missile {m+1} launched at t = {t:.2f}s")
+            else:
+                print(f"Missile launched at t = {t:.2f}s")
+
+        if missile_launched[m]:
+            # Missile holds position after intercept or death
+            if intercepted[m] or missile_dead[m]:
+                all_missile_states[m, i] = all_missile_states[m, i-1]
+                all_missile_velocities[m, i] = all_missile_velocities[m, i-1]
+                all_missile_speeds[m, i] = all_missile_speeds[m, i-1]
+                continue
+
+            # Get target info
+            target_pos = target_states[i]
+            target_vel = target_velocities[i]
+            target_accel = target_accelerations[i]
+
+            # Check for intercept
+            distance = np.linalg.norm(target_pos - all_missile_states[m, i-1])
+            if distance < kill_dist and intercept_times[m] is None:
+                intercept_times[m] = t
+                intercept_indices[m] = i
+                intercepted[m] = True
+                any_intercepted = True
+                if ENABLE_MULTI_MISSILE:
+                    print(f"Missile {m+1} intercept at t = {t:.2f}s, distance = {distance:.1f}m")
+                else:
+                    print(f"Intercept at t = {t:.2f}s, distance = {distance:.1f}m")
+                all_missile_states[m, i] = all_missile_states[m, i-1]
+                all_missile_velocities[m, i] = all_missile_velocities[m, i-1]
+                all_missile_speeds[m, i] = all_missile_speeds[m, i-1]
+                continue
+
+            # Apply guidance algorithm
+            guidance_name = MISSILE_CONFIGS[m]["guidance"] if ENABLE_MULTI_MISSILE else GUIDANCE_ALGORITHM
+            if guidance_name == "augmented_pn":
+                guided_pos, prev_los_list[m] = augmented_pn_guidance(
+                    all_missile_states[m, i-1], target_pos, target_vel,
+                    miss_vel, dt, prev_los_list[m], target_accel
+                )
+            else:
+                guided_pos, prev_los_list[m] = guidance_funcs[m](
+                    all_missile_states[m, i-1], target_pos, target_vel,
+                    miss_vel, dt, prev_los_list[m]
+                )
+
+            # Calculate desired direction from guidance
+            desired_direction = guided_pos - all_missile_states[m, i-1]
+            dir_norm = np.linalg.norm(desired_direction)
+            if dir_norm > 1e-6:
+                desired_direction = desired_direction / dir_norm
+            else:
+                desired_direction = prev_los_list[m] if prev_los_list[m] is not None else np.array([1, 0, 0])
+
+            # Apply physics
+            time_since_launch = t - times[missile_launch_indices[m]]
+            new_pos, new_vel, is_alive = apply_physics(
+                all_missile_states[m, i-1],
+                all_missile_velocities[m, i-1],
+                desired_direction,
+                dt,
+                time_since_launch
             )
 
-        # Calculate desired direction from guidance
-        desired_direction = guided_pos - missile_states[i-1]
-        dir_norm = np.linalg.norm(desired_direction)
-        if dir_norm > 1e-6:
-            desired_direction = desired_direction / dir_norm
+            # Check if missile died (too slow)
+            if not is_alive and not missile_dead[m]:
+                missile_dead[m] = True
+                missile_dead_times[m] = t
+                if ENABLE_MULTI_MISSILE:
+                    print(f"Missile {m+1} lost energy at t = {t:.2f}s (speed below {MIN_MISSILE_SPEED} m/s)")
+                else:
+                    print(f"Missile lost energy at t = {t:.2f}s (speed below {MIN_MISSILE_SPEED} m/s)")
+
+            all_missile_states[m, i] = new_pos
+            all_missile_velocities[m, i] = new_vel
+            all_missile_speeds[m, i] = np.linalg.norm(new_vel)
         else:
-            desired_direction = prev_los if prev_los is not None else np.array([1, 0, 0])
+            # Missile hasn't launched yet, stays at starting position
+            if ENABLE_MULTI_MISSILE:
+                all_missile_states[m, i] = MISSILE_CONFIGS[m]["start_pos"]
+            else:
+                all_missile_states[m, i] = missile_start_loc
+            all_missile_velocities[m, i] = all_missile_velocities[m, 0]
+            all_missile_speeds[m, i] = miss_vel
 
-        # Apply physics
-        time_since_launch = t - times[missile_launch_index]
-        new_pos, new_vel, is_alive = apply_physics(
-            missile_states[i-1],
-            missile_velocities[i-1],
-            desired_direction,
-            dt,
-            time_since_launch
-        )
+# Update references for backwards compatibility
+missile_states = all_missile_states[0]
+missile_velocities = all_missile_velocities[0]
+missile_speeds = all_missile_speeds[0]
+intercept_time = intercept_times[0]
+intercept_index = intercept_indices[0]
 
-        # Check if missile died (too slow)
-        if not is_alive and not missile_dead:
-            missile_dead = True
-            missile_dead_time = t
-            print(f"Missile lost energy at t = {t:.2f}s (speed below {MIN_MISSILE_SPEED} m/s)")
-
-        missile_states[i] = new_pos
-        missile_velocities[i] = new_vel
-        missile_speeds[i] = np.linalg.norm(new_vel)
+# Calculate final miss distances
+print(f"\n--- Simulation Results ---")
+for m in range(num_missiles):
+    final_dist = np.linalg.norm(target_states[-1] - all_missile_states[m, -1])
+    status = "HIT" if intercepted[m] else ("DEAD" if missile_dead[m] else "MISS")
+    if ENABLE_MULTI_MISSILE:
+        print(f"Missile {m+1}: {status}, final distance: {final_dist:.1f}m")
     else:
-        # Missile hasn't launched yet, stays at starting position
-        missile_states[i] = missile_start_loc
-        missile_velocities[i] = missile_velocities[0]
-        missile_speeds[i] = miss_vel
-
-# Calculate final miss distance
-final_distance = np.linalg.norm(target_states[-1] - missile_states[-1])
-print(f"Final miss distance: {final_distance:.1f}m")
+        print(f"Final miss distance: {final_dist:.1f}m")
 
 # ============================================================================
 # CREATE 3D PLOT
@@ -966,8 +1079,12 @@ print(f"Final miss distance: {final_distance:.1f}m")
 fig = plt.figure(figsize=(14, 10))
 ax = fig.add_subplot(111, projection='3d')
 
-# Set axis limits based on both trajectories
-all_points = np.vstack([target_states, missile_states])
+# Set axis limits based on all trajectories
+all_trajectory_points = [target_states]
+for m in range(num_missiles):
+    all_trajectory_points.append(all_missile_states[m])
+all_points = np.vstack(all_trajectory_points)
+
 padding = 0.1
 x_range = np.ptp(all_points[:, 0])
 y_range = np.ptp(all_points[:, 1])
@@ -988,36 +1105,65 @@ ax.set_box_aspect([1, 1, 1])
 ax.set_xlabel('X (m)')
 ax.set_ylabel('Y (m)')
 ax.set_zlabel('Z (m)')
-ax.set_title(f'3D Missile-Aircraft Pursuit Simulation\nGuidance: {GUIDANCE_ALGORITHM.replace("_", " ").title()}')
+if ENABLE_MULTI_MISSILE:
+    ax.set_title(f'3D Missile-Aircraft Pursuit Simulation\n{num_missiles} Missiles')
+else:
+    ax.set_title(f'3D Missile-Aircraft Pursuit Simulation\nGuidance: {GUIDANCE_ALGORITHM.replace("_", " ").title()}')
 ax.grid(True)
 ax.view_init(elev=20, azim=45)
 
 # Create animation artists
 target_point, = ax.plot([], [], [], 'bo', markersize=10, label='Aircraft')
 target_trail, = ax.plot([], [], [], 'b-', linewidth=2, alpha=0.5, label='Aircraft Trail')
-missile_point, = ax.plot([], [], [], 'ro', markersize=8, label='Missile')
-missile_trail, = ax.plot([], [], [], 'r-', linewidth=1.5, alpha=0.5, label='Missile Trail')
+
+# Create artists for each missile
+missile_points = []
+missile_trails = []
+missile_colors = ['red', 'orange', 'magenta', 'cyan', 'yellow', 'lime']
+
+for m in range(num_missiles):
+    if ENABLE_MULTI_MISSILE:
+        color = MISSILE_CONFIGS[m].get("color", missile_colors[m % len(missile_colors)])
+    else:
+        color = 'red'
+    point, = ax.plot([], [], [], 'o', color=color, markersize=8, label=f'Missile {m+1}' if ENABLE_MULTI_MISSILE else 'Missile')
+    trail, = ax.plot([], [], [], '-', color=color, linewidth=1.5, alpha=0.5)
+    missile_points.append(point)
+    missile_trails.append(trail)
+
+# HUD text
 time_text = ax.text2D(0.02, 0.95, '', transform=ax.transAxes, fontsize=12)
 speed_text = ax.text2D(0.02, 0.90, '', transform=ax.transAxes, fontsize=10)
 missile_speed_text = ax.text2D(0.02, 0.85, '', transform=ax.transAxes, fontsize=10, color='red')
 distance_text = ax.text2D(0.02, 0.80, '', transform=ax.transAxes, fontsize=10)
-algo_text = ax.text2D(0.02, 0.75, f'Algorithm: {GUIDANCE_ALGORITHM}', transform=ax.transAxes, fontsize=10, color='purple')
+algo_text = ax.text2D(0.02, 0.75, f'Missiles: {num_missiles}' if ENABLE_MULTI_MISSILE else f'Algorithm: {GUIDANCE_ALGORITHM}', transform=ax.transAxes, fontsize=10, color='purple')
 physics_text = ax.text2D(0.02, 0.70, f'Physics: {"ON" if ENABLE_PHYSICS else "OFF"}', transform=ax.transAxes, fontsize=10, color='green' if ENABLE_PHYSICS else 'gray')
 evasion_text = ax.text2D(0.02, 0.65, f'Evasion: {EVASION_PATTERN if ENABLE_EVASION else "OFF"}', transform=ax.transAxes, fontsize=10, color='orange' if ENABLE_EVASION else 'gray')
 
 # Starting position markers
 ax.scatter(target_states[0, 0], target_states[0, 1], target_states[0, 2],
            c='green', s=100, marker='s', label='Aircraft Start')
-ax.scatter(missile_start_loc[0], missile_start_loc[1], missile_start_loc[2],
-           c='orange', s=100, marker='^', label='Missile Start')
 
-# Mark intercept point if it exists
-if intercept_index is not None:
-    ax.scatter(target_states[intercept_index, 0], target_states[intercept_index, 1],
-               target_states[intercept_index, 2],
-               c='red', s=200, marker='*', label='Intercept')
+# Mark missile start positions
+for m in range(num_missiles):
+    if ENABLE_MULTI_MISSILE:
+        start_pos = MISSILE_CONFIGS[m]["start_pos"]
+        color = MISSILE_CONFIGS[m].get("color", missile_colors[m % len(missile_colors)])
+    else:
+        start_pos = missile_start_loc
+        color = 'orange'
+    ax.scatter(start_pos[0], start_pos[1], start_pos[2],
+               c=color, s=100, marker='^', alpha=0.7)
 
-ax.legend()
+# Mark intercept points
+for m in range(num_missiles):
+    if intercept_indices[m] is not None:
+        idx = intercept_indices[m]
+        ax.scatter(target_states[idx, 0], target_states[idx, 1],
+                   target_states[idx, 2],
+                   c='red', s=200, marker='*')
+
+ax.legend(loc='upper right')
 
 # ============================================================================
 # ANIMATION FUNCTIONS
@@ -1028,15 +1174,20 @@ def init():
     target_point.set_3d_properties([])
     target_trail.set_data([], [])
     target_trail.set_3d_properties([])
-    missile_point.set_data([], [])
-    missile_point.set_3d_properties([])
-    missile_trail.set_data([], [])
-    missile_trail.set_3d_properties([])
+
+    for m in range(num_missiles):
+        missile_points[m].set_data([], [])
+        missile_points[m].set_3d_properties([])
+        missile_trails[m].set_data([], [])
+        missile_trails[m].set_3d_properties([])
+
     time_text.set_text('')
     speed_text.set_text('')
     missile_speed_text.set_text('')
     distance_text.set_text('')
-    return target_point, target_trail, missile_point, missile_trail, time_text, speed_text, missile_speed_text, distance_text
+
+    artists = [target_point, target_trail] + missile_points + missile_trails + [time_text, speed_text, missile_speed_text, distance_text]
+    return tuple(artists)
 
 
 def update(frame):
@@ -1049,13 +1200,21 @@ def update(frame):
     target_trail.set_data(target_states[:frame+1, 0], target_states[:frame+1, 1])
     target_trail.set_3d_properties(target_states[:frame+1, 2])
 
-    # Update missile position
-    missile_point.set_data([missile_states[frame, 0]], [missile_states[frame, 1]])
-    missile_point.set_3d_properties([missile_states[frame, 2]])
+    # Update all missiles
+    min_distance = float('inf')
+    for m in range(num_missiles):
+        # Update missile position
+        missile_points[m].set_data([all_missile_states[m, frame, 0]], [all_missile_states[m, frame, 1]])
+        missile_points[m].set_3d_properties([all_missile_states[m, frame, 2]])
 
-    # Update missile trail
-    missile_trail.set_data(missile_states[:frame+1, 0], missile_states[:frame+1, 1])
-    missile_trail.set_3d_properties(missile_states[:frame+1, 2])
+        # Update missile trail
+        missile_trails[m].set_data(all_missile_states[m, :frame+1, 0], all_missile_states[m, :frame+1, 1])
+        missile_trails[m].set_3d_properties(all_missile_states[m, :frame+1, 2])
+
+        # Track closest missile distance
+        dist = np.linalg.norm(target_states[frame] - all_missile_states[m, frame])
+        if dist < min_distance:
+            min_distance = dist
 
     # Calculate current target speed (for display)
     if frame > 0:
@@ -1066,19 +1225,21 @@ def update(frame):
     else:
         target_speed = targ_vel
 
-    # Get missile speed
-    missile_speed = missile_speeds[frame]
-
-    # Calculate distance between missile and target
-    distance = np.linalg.norm(target_states[frame] - missile_states[frame])
+    # Get average missile speed (or first missile for single mode)
+    if ENABLE_MULTI_MISSILE:
+        avg_speed = np.mean([all_missile_speeds[m, frame] for m in range(num_missiles)])
+        missile_speed_str = f'Avg Missile Speed = {avg_speed:.1f} m/s'
+    else:
+        missile_speed_str = f'Missile Speed = {all_missile_speeds[0, frame]:.1f} m/s'
 
     # Update text
     time_text.set_text(f'Time = {times[frame]:.2f} s')
     speed_text.set_text(f'Target Speed = {target_speed:.1f} m/s')
-    missile_speed_text.set_text(f'Missile Speed = {missile_speed:.1f} m/s')
-    distance_text.set_text(f'Distance = {distance:.1f} m')
+    missile_speed_text.set_text(missile_speed_str)
+    distance_text.set_text(f'Closest = {min_distance:.1f} m')
 
-    return target_point, target_trail, missile_point, missile_trail, time_text, speed_text, missile_speed_text, distance_text
+    artists = [target_point, target_trail] + missile_points + missile_trails + [time_text, speed_text, missile_speed_text, distance_text]
+    return tuple(artists)
 
 
 # ============================================================================
