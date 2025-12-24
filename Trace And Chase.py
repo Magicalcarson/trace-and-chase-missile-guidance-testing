@@ -19,6 +19,35 @@ GUIDANCE_ALGORITHM = "proportional_navigation"  # Change this to select algorith
 PN_CONSTANT = 4  # Navigation constant for PN (typically 3-5)
 
 # ============================================================================
+# PHYSICS SETTINGS
+# ============================================================================
+# Enable/disable physics effects
+ENABLE_PHYSICS = True  # Master switch for all physics effects
+
+# Gravity
+ENABLE_GRAVITY = True
+GRAVITY = 9.81  # m/s^2 (Earth's gravity)
+
+# Aerodynamic Drag
+ENABLE_DRAG = True
+# Drag coefficient: F_drag = 0.5 * rho * v^2 * Cd * A
+# Simplified: a_drag = DRAG_COEFFICIENT * v^2 (combined constant)
+DRAG_COEFFICIENT = 0.00001  # Adjust for desired drag effect
+
+# Turn Rate Limit (maximum angular velocity the missile can turn)
+ENABLE_TURN_LIMIT = True
+MAX_TURN_RATE = 20.0  # degrees per second (typical missile: 15-30 deg/s)
+MAX_TURN_RATE_RAD = np.radians(MAX_TURN_RATE)  # Convert to radians
+
+# Thrust and Fuel
+ENABLE_FUEL = True
+FUEL_DURATION = 30.0  # seconds of powered flight
+THRUST_ACCELERATION = 50.0  # m/s^2 acceleration from thrust (when fuel available)
+
+# Missile minimum speed (below this, missile is considered "dead")
+MIN_MISSILE_SPEED = 100.0  # m/s
+
+# ============================================================================
 # Variables
 # ============================================================================
 Straight_time = 25      # Duration of first straight segment (s)
@@ -363,6 +392,196 @@ def get_guidance_function(algorithm_name):
 
 
 # ============================================================================
+# PHYSICS FUNCTIONS
+# ============================================================================
+
+def apply_turn_rate_limit(current_direction, desired_direction, dt):
+    """
+    Limit the rate at which the missile can change its heading.
+
+    Parameters:
+    - current_direction: current velocity unit vector
+    - desired_direction: desired velocity unit vector (from guidance)
+    - dt: time step
+
+    Returns:
+    - new_direction: limited direction unit vector
+    """
+    if not ENABLE_PHYSICS or not ENABLE_TURN_LIMIT:
+        return desired_direction
+
+    # Calculate angle between current and desired direction
+    dot_product = np.clip(np.dot(current_direction, desired_direction), -1.0, 1.0)
+    angle = np.arccos(dot_product)
+
+    # Maximum angle change in this time step
+    max_angle_change = MAX_TURN_RATE_RAD * dt
+
+    if angle <= max_angle_change:
+        # Can achieve desired direction
+        return desired_direction
+
+    # Need to limit the turn
+    # Calculate rotation axis (perpendicular to both vectors)
+    rotation_axis = np.cross(current_direction, desired_direction)
+    axis_norm = np.linalg.norm(rotation_axis)
+
+    if axis_norm < 1e-10:
+        # Vectors are parallel or anti-parallel
+        return desired_direction
+
+    rotation_axis = rotation_axis / axis_norm
+
+    # Rotate current direction by max_angle_change toward desired direction
+    # Using Rodrigues' rotation formula
+    cos_angle = np.cos(max_angle_change)
+    sin_angle = np.sin(max_angle_change)
+
+    new_direction = (current_direction * cos_angle +
+                     np.cross(rotation_axis, current_direction) * sin_angle +
+                     rotation_axis * np.dot(rotation_axis, current_direction) * (1 - cos_angle))
+
+    # Normalize
+    new_direction = new_direction / np.linalg.norm(new_direction)
+
+    return new_direction
+
+
+def apply_gravity(velocity, dt):
+    """
+    Apply gravitational acceleration to velocity.
+
+    Parameters:
+    - velocity: current velocity vector [vx, vy, vz]
+    - dt: time step
+
+    Returns:
+    - new_velocity: velocity after gravity applied
+    """
+    if not ENABLE_PHYSICS or not ENABLE_GRAVITY:
+        return velocity
+
+    # Gravity acts in -Z direction
+    gravity_accel = np.array([0, 0, -GRAVITY])
+    new_velocity = velocity + gravity_accel * dt
+
+    return new_velocity
+
+
+def apply_drag(velocity, dt):
+    """
+    Apply aerodynamic drag to velocity.
+    Drag force is proportional to v^2 and opposite to velocity direction.
+
+    Parameters:
+    - velocity: current velocity vector
+    - dt: time step
+
+    Returns:
+    - new_velocity: velocity after drag applied
+    """
+    if not ENABLE_PHYSICS or not ENABLE_DRAG:
+        return velocity
+
+    speed = np.linalg.norm(velocity)
+    if speed < 1e-6:
+        return velocity
+
+    # Drag acceleration magnitude (opposite to velocity)
+    drag_accel_magnitude = DRAG_COEFFICIENT * speed * speed
+
+    # Drag acceleration vector (opposite to velocity direction)
+    velocity_dir = velocity / speed
+    drag_accel = -drag_accel_magnitude * velocity_dir
+
+    new_velocity = velocity + drag_accel * dt
+
+    return new_velocity
+
+
+def apply_thrust(velocity, direction, dt, time_since_launch):
+    """
+    Apply thrust acceleration if fuel is available.
+
+    Parameters:
+    - velocity: current velocity vector
+    - direction: thrust direction (unit vector)
+    - dt: time step
+    - time_since_launch: time since missile launch
+
+    Returns:
+    - new_velocity: velocity after thrust applied
+    """
+    if not ENABLE_PHYSICS or not ENABLE_FUEL:
+        return velocity
+
+    if time_since_launch > FUEL_DURATION:
+        # No more fuel
+        return velocity
+
+    # Apply thrust in the direction of travel
+    thrust_accel = direction * THRUST_ACCELERATION
+    new_velocity = velocity + thrust_accel * dt
+
+    return new_velocity
+
+
+def apply_physics(position, velocity, desired_direction, dt, time_since_launch):
+    """
+    Apply all physics effects to the missile.
+
+    Parameters:
+    - position: current position
+    - velocity: current velocity vector
+    - desired_direction: desired direction from guidance (unit vector)
+    - dt: time step
+    - time_since_launch: time since missile launch
+
+    Returns:
+    - new_position: updated position
+    - new_velocity: updated velocity
+    - is_alive: whether missile is still functional
+    """
+    if not ENABLE_PHYSICS:
+        # No physics - just move in desired direction at constant speed
+        speed = np.linalg.norm(velocity)
+        new_velocity = desired_direction * speed
+        new_position = position + new_velocity * dt
+        return new_position, new_velocity, True
+
+    # Current state
+    speed = np.linalg.norm(velocity)
+    if speed < 1e-6:
+        current_direction = desired_direction
+    else:
+        current_direction = velocity / speed
+
+    # 1. Apply turn rate limit to get actual direction
+    actual_direction = apply_turn_rate_limit(current_direction, desired_direction, dt)
+
+    # 2. Start with current velocity magnitude in new direction
+    new_velocity = actual_direction * speed
+
+    # 3. Apply thrust (if fuel available)
+    new_velocity = apply_thrust(new_velocity, actual_direction, dt, time_since_launch)
+
+    # 4. Apply gravity
+    new_velocity = apply_gravity(new_velocity, dt)
+
+    # 5. Apply drag
+    new_velocity = apply_drag(new_velocity, dt)
+
+    # 6. Check if missile is still alive (minimum speed)
+    new_speed = np.linalg.norm(new_velocity)
+    is_alive = new_speed >= MIN_MISSILE_SPEED
+
+    # 7. Update position
+    new_position = position + new_velocity * dt
+
+    return new_position, new_velocity, is_alive
+
+
+# ============================================================================
 # GENERATE TARGET TRAJECTORY Array
 # ============================================================================
 # Reset initialization flags before generating trajectory
@@ -399,15 +618,37 @@ print(f"\nUsing guidance algorithm: {GUIDANCE_ALGORITHM}")
 if GUIDANCE_ALGORITHM in ["proportional_navigation", "augmented_pn"]:
     print(f"Navigation constant (N): {PN_CONSTANT}")
 
+# Print physics settings
+if ENABLE_PHYSICS:
+    print(f"\nPhysics enabled:")
+    print(f"  - Gravity: {'ON' if ENABLE_GRAVITY else 'OFF'} ({GRAVITY} m/s²)")
+    print(f"  - Drag: {'ON' if ENABLE_DRAG else 'OFF'} (coeff: {DRAG_COEFFICIENT})")
+    print(f"  - Turn limit: {'ON' if ENABLE_TURN_LIMIT else 'OFF'} ({MAX_TURN_RATE}°/s)")
+    print(f"  - Fuel: {'ON' if ENABLE_FUEL else 'OFF'} ({FUEL_DURATION}s, {THRUST_ACCELERATION} m/s²)")
+else:
+    print(f"\nPhysics disabled (ideal motion)")
+
 # ============================================================================
 # GENERATE MISSILE TRAJECTORY
 # ============================================================================
 missile_states = np.zeros((n_points, 3))
+missile_velocities = np.zeros((n_points, 3))  # Track velocity for physics
+missile_speeds = np.zeros(n_points)  # Track speed for display
 missile_states[0] = missile_start_loc
+
+# Initial velocity (pointing toward target)
+initial_direction = target_states[0] - missile_start_loc
+initial_direction = initial_direction / np.linalg.norm(initial_direction)
+missile_velocities[0] = initial_direction * miss_vel
+missile_speeds[0] = miss_vel
+
 missile_launched = False
+missile_launch_index = 0
 intercept_time = None
 intercept_index = None
 intercepted = False
+missile_dead = False
+missile_dead_time = None
 prev_los = None  # For PN algorithms
 
 # Get the selected guidance function
@@ -419,12 +660,15 @@ for i in range(1, n_points):
     # Check if missile should launch
     if t >= missile_launch_time and not missile_launched:
         missile_launched = True
+        missile_launch_index = i
         print(f"Missile launched at t = {t:.2f}s")
 
     if missile_launched:
-        # Missile holds intercept point after intercept occurs
-        if intercepted:
+        # Missile holds position after intercept or death
+        if intercepted or missile_dead:
             missile_states[i] = missile_states[i-1]
+            missile_velocities[i] = missile_velocities[i-1]
+            missile_speeds[i] = missile_speeds[i-1]
             continue
 
         # Get target info for this timestep
@@ -440,24 +684,54 @@ for i in range(1, n_points):
             intercepted = True
             print(f"Intercept at t = {t:.2f}s, distance = {distance:.1f}m")
             missile_states[i] = missile_states[i-1]
+            missile_velocities[i] = missile_velocities[i-1]
+            missile_speeds[i] = missile_speeds[i-1]
             continue
 
-        # Apply selected guidance algorithm
+        # Apply selected guidance algorithm to get desired direction
         if GUIDANCE_ALGORITHM == "augmented_pn":
-            new_pos, prev_los = augmented_pn_guidance(
+            guided_pos, prev_los = augmented_pn_guidance(
                 missile_states[i-1], target_pos, target_vel,
                 miss_vel, dt, prev_los, target_accel
             )
         else:
-            new_pos, prev_los = guidance_func(
+            guided_pos, prev_los = guidance_func(
                 missile_states[i-1], target_pos, target_vel,
                 miss_vel, dt, prev_los
             )
 
+        # Calculate desired direction from guidance
+        desired_direction = guided_pos - missile_states[i-1]
+        dir_norm = np.linalg.norm(desired_direction)
+        if dir_norm > 1e-6:
+            desired_direction = desired_direction / dir_norm
+        else:
+            desired_direction = prev_los if prev_los is not None else np.array([1, 0, 0])
+
+        # Apply physics
+        time_since_launch = t - times[missile_launch_index]
+        new_pos, new_vel, is_alive = apply_physics(
+            missile_states[i-1],
+            missile_velocities[i-1],
+            desired_direction,
+            dt,
+            time_since_launch
+        )
+
+        # Check if missile died (too slow)
+        if not is_alive and not missile_dead:
+            missile_dead = True
+            missile_dead_time = t
+            print(f"Missile lost energy at t = {t:.2f}s (speed below {MIN_MISSILE_SPEED} m/s)")
+
         missile_states[i] = new_pos
+        missile_velocities[i] = new_vel
+        missile_speeds[i] = np.linalg.norm(new_vel)
     else:
         # Missile hasn't launched yet, stays at starting position
         missile_states[i] = missile_start_loc
+        missile_velocities[i] = missile_velocities[0]
+        missile_speeds[i] = miss_vel
 
 # Calculate final miss distance
 final_distance = np.linalg.norm(target_states[-1] - missile_states[-1])
@@ -502,8 +776,10 @@ missile_point, = ax.plot([], [], [], 'ro', markersize=8, label='Missile')
 missile_trail, = ax.plot([], [], [], 'r-', linewidth=1.5, alpha=0.5, label='Missile Trail')
 time_text = ax.text2D(0.02, 0.95, '', transform=ax.transAxes, fontsize=12)
 speed_text = ax.text2D(0.02, 0.90, '', transform=ax.transAxes, fontsize=10)
-distance_text = ax.text2D(0.02, 0.85, '', transform=ax.transAxes, fontsize=10)
-algo_text = ax.text2D(0.02, 0.80, f'Algorithm: {GUIDANCE_ALGORITHM}', transform=ax.transAxes, fontsize=10, color='purple')
+missile_speed_text = ax.text2D(0.02, 0.85, '', transform=ax.transAxes, fontsize=10, color='red')
+distance_text = ax.text2D(0.02, 0.80, '', transform=ax.transAxes, fontsize=10)
+algo_text = ax.text2D(0.02, 0.75, f'Algorithm: {GUIDANCE_ALGORITHM}', transform=ax.transAxes, fontsize=10, color='purple')
+physics_text = ax.text2D(0.02, 0.70, f'Physics: {"ON" if ENABLE_PHYSICS else "OFF"}', transform=ax.transAxes, fontsize=10, color='green' if ENABLE_PHYSICS else 'gray')
 
 # Starting position markers
 ax.scatter(target_states[0, 0], target_states[0, 1], target_states[0, 2],
@@ -534,8 +810,9 @@ def init():
     missile_trail.set_3d_properties([])
     time_text.set_text('')
     speed_text.set_text('')
+    missile_speed_text.set_text('')
     distance_text.set_text('')
-    return target_point, target_trail, missile_point, missile_trail, time_text, speed_text, distance_text
+    return target_point, target_trail, missile_point, missile_trail, time_text, speed_text, missile_speed_text, distance_text
 
 
 def update(frame):
@@ -556,24 +833,28 @@ def update(frame):
     missile_trail.set_data(missile_states[:frame+1, 0], missile_states[:frame+1, 1])
     missile_trail.set_3d_properties(missile_states[:frame+1, 2])
 
-    # Calculate current speed (for display)
+    # Calculate current target speed (for display)
     if frame > 0:
         dx = target_states[frame, 0] - target_states[frame-1, 0]
         dy = target_states[frame, 1] - target_states[frame-1, 1]
         dz = target_states[frame, 2] - target_states[frame-1, 2]
-        speed = np.sqrt(dx**2 + dy**2 + dz**2) / dt
+        target_speed = np.sqrt(dx**2 + dy**2 + dz**2) / dt
     else:
-        speed = targ_vel
+        target_speed = targ_vel
+
+    # Get missile speed
+    missile_speed = missile_speeds[frame]
 
     # Calculate distance between missile and target
     distance = np.linalg.norm(target_states[frame] - missile_states[frame])
 
     # Update text
     time_text.set_text(f'Time = {times[frame]:.2f} s')
-    speed_text.set_text(f'Target Speed = {speed:.1f} m/s')
+    speed_text.set_text(f'Target Speed = {target_speed:.1f} m/s')
+    missile_speed_text.set_text(f'Missile Speed = {missile_speed:.1f} m/s')
     distance_text.set_text(f'Distance = {distance:.1f} m')
 
-    return target_point, target_trail, missile_point, missile_trail, time_text, speed_text, distance_text
+    return target_point, target_trail, missile_point, missile_trail, time_text, speed_text, missile_speed_text, distance_text
 
 
 # ============================================================================
