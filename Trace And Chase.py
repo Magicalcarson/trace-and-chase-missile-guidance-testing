@@ -124,6 +124,50 @@ SALVO_INTERVAL = 1.0  # seconds between each launch in salvo
 TARGET_ASSIGNMENT = "single"
 
 # ============================================================================
+# COUNTERMEASURES SETTINGS
+# ============================================================================
+# Enable countermeasures system
+ENABLE_COUNTERMEASURES = True
+
+# Countermeasure types:
+# - "flare"   : IR decoy - attracts heat-seeking missiles
+# - "chaff"   : Radar decoy - confuses radar-guided missiles
+# - "ecm"     : Electronic countermeasures - jams missile guidance
+
+# Flare settings
+ENABLE_FLARES = True
+FLARE_COUNT = 10  # Number of flares available
+FLARE_DEPLOY_DISTANCE = 3000.0  # Deploy when missile is this close (m)
+FLARE_DEPLOY_INTERVAL = 2.0  # Minimum time between flare deployments (s)
+FLARE_EFFECTIVENESS = 0.6  # Probability of successfully decoying missile (0-1)
+FLARE_DURATION = 5.0  # How long flare remains effective (s)
+FLARE_FALL_RATE = 50.0  # How fast flare falls (m/s)
+
+# Chaff settings
+ENABLE_CHAFF = True
+CHAFF_COUNT = 8  # Number of chaff bundles available
+CHAFF_DEPLOY_DISTANCE = 4000.0  # Deploy distance
+CHAFF_DEPLOY_INTERVAL = 3.0  # Minimum time between chaff deployments
+CHAFF_EFFECTIVENESS = 0.5  # Probability of breaking radar lock
+CHAFF_CLOUD_RADIUS = 200.0  # Radius of chaff cloud (m)
+CHAFF_DURATION = 8.0  # How long chaff cloud remains effective (s)
+
+# ECM (Electronic Countermeasures) settings
+ENABLE_ECM = True
+ECM_RANGE = 5000.0  # Effective range of ECM
+ECM_EFFECTIVENESS = 0.3  # Reduces missile accuracy by this factor
+ECM_GUIDANCE_NOISE = 0.1  # Adds noise to missile guidance (radians)
+
+# Countermeasure susceptibility by missile guidance type
+# Higher value = more susceptible to that countermeasure
+CM_SUSCEPTIBILITY = {
+    "pure_pursuit": {"flare": 0.8, "chaff": 0.2, "ecm": 0.3},
+    "lead_pursuit": {"flare": 0.7, "chaff": 0.3, "ecm": 0.4},
+    "proportional_navigation": {"flare": 0.5, "chaff": 0.5, "ecm": 0.5},
+    "augmented_pn": {"flare": 0.4, "chaff": 0.4, "ecm": 0.6},
+}
+
+# ============================================================================
 # Variables
 # ============================================================================
 Straight_time = 25      # Duration of first straight segment (s)
@@ -796,6 +840,149 @@ def calculate_evasion_offset(t, base_position, base_velocity, missile_position, 
 
 
 # ============================================================================
+# COUNTERMEASURES SYSTEM
+# ============================================================================
+
+class CountermeasuresSystem:
+    """Manages countermeasures (flares, chaff, ECM) for the target aircraft."""
+
+    def __init__(self):
+        self.flares_remaining = FLARE_COUNT
+        self.chaff_remaining = CHAFF_COUNT
+        self.last_flare_time = -FLARE_DEPLOY_INTERVAL
+        self.last_chaff_time = -CHAFF_DEPLOY_INTERVAL
+
+        # Active countermeasures
+        self.active_flares = []  # List of (position, deploy_time, velocity)
+        self.active_chaff = []   # List of (position, deploy_time)
+
+        # Missile states affected by countermeasures
+        self.decoyed_missiles = set()  # Missiles that are chasing decoys
+        self.jammed_missiles = set()   # Missiles affected by ECM
+
+        # Random generator for countermeasure effects
+        self.rng = np.random.default_rng(42)
+
+    def update(self, t, aircraft_pos, aircraft_vel, missile_positions, missile_indices, guidance_types, dt):
+        """
+        Update countermeasures state and check for deployment.
+
+        Returns:
+        - decoyed_missiles: set of missile indices that are chasing decoys
+        - ecm_noise: dict of missile_index -> noise vector to add to guidance
+        """
+        # Update active flares (they fall and eventually expire)
+        self._update_active_flares(t, dt)
+
+        # Update active chaff (expires over time)
+        self._update_active_chaff(t)
+
+        # Check if we should deploy countermeasures
+        self._check_and_deploy(t, aircraft_pos, aircraft_vel, missile_positions, missile_indices, guidance_types)
+
+        # Calculate ECM effects
+        ecm_noise = {}
+        if ENABLE_ECM and ENABLE_COUNTERMEASURES:
+            for idx, m_pos in zip(missile_indices, missile_positions):
+                if idx in self.decoyed_missiles:
+                    continue  # Already decoyed, no ECM needed
+
+                distance = np.linalg.norm(aircraft_pos - m_pos)
+                if distance < ECM_RANGE:
+                    # Apply ECM jamming
+                    guidance_type = guidance_types.get(idx, "proportional_navigation")
+                    susceptibility = CM_SUSCEPTIBILITY.get(guidance_type, {}).get("ecm", 0.5)
+
+                    if self.rng.random() < ECM_EFFECTIVENESS * susceptibility:
+                        # Generate random noise for guidance
+                        noise_magnitude = ECM_GUIDANCE_NOISE * susceptibility
+                        noise = self.rng.normal(0, noise_magnitude, 3)
+                        ecm_noise[idx] = noise
+
+        return self.decoyed_missiles, ecm_noise
+
+    def _update_active_flares(self, t, dt):
+        """Update flare positions (they fall) and remove expired ones."""
+        updated_flares = []
+        for pos, deploy_time, vel in self.active_flares:
+            if t - deploy_time < FLARE_DURATION:
+                # Flare is still active, update position (falling)
+                new_pos = pos + vel * dt
+                new_vel = vel.copy()
+                new_vel[2] -= FLARE_FALL_RATE * dt  # Fall faster over time
+                updated_flares.append((new_pos, deploy_time, new_vel))
+        self.active_flares = updated_flares
+
+    def _update_active_chaff(self, t):
+        """Remove expired chaff clouds."""
+        self.active_chaff = [(pos, deploy_time) for pos, deploy_time in self.active_chaff
+                             if t - deploy_time < CHAFF_DURATION]
+
+    def _check_and_deploy(self, t, aircraft_pos, aircraft_vel, missile_positions, missile_indices, guidance_types):
+        """Check if countermeasures should be deployed and deploy them."""
+        for idx, m_pos in zip(missile_indices, missile_positions):
+            if idx in self.decoyed_missiles:
+                continue  # Already dealt with this missile
+
+            distance = np.linalg.norm(aircraft_pos - m_pos)
+            guidance_type = guidance_types.get(idx, "proportional_navigation")
+
+            # Check flare deployment
+            if (ENABLE_FLARES and ENABLE_COUNTERMEASURES and
+                self.flares_remaining > 0 and
+                distance < FLARE_DEPLOY_DISTANCE and
+                t - self.last_flare_time >= FLARE_DEPLOY_INTERVAL):
+
+                susceptibility = CM_SUSCEPTIBILITY.get(guidance_type, {}).get("flare", 0.5)
+                if self.rng.random() < FLARE_EFFECTIVENESS * susceptibility:
+                    # Flare successfully decoys the missile
+                    self.decoyed_missiles.add(idx)
+                    print(f"t={t:.2f}s: Flare deployed - Missile {idx+1} decoyed!")
+
+                # Deploy flare regardless of success
+                flare_vel = aircraft_vel.copy() * 0.3  # Flare starts with some aircraft velocity
+                flare_vel[2] -= FLARE_FALL_RATE  # Initial downward velocity
+                self.active_flares.append((aircraft_pos.copy(), t, flare_vel))
+                self.flares_remaining -= 1
+                self.last_flare_time = t
+
+            # Check chaff deployment
+            if (ENABLE_CHAFF and ENABLE_COUNTERMEASURES and
+                self.chaff_remaining > 0 and
+                distance < CHAFF_DEPLOY_DISTANCE and
+                t - self.last_chaff_time >= CHAFF_DEPLOY_INTERVAL):
+
+                susceptibility = CM_SUSCEPTIBILITY.get(guidance_type, {}).get("chaff", 0.5)
+                if self.rng.random() < CHAFF_EFFECTIVENESS * susceptibility:
+                    # Chaff successfully confuses the missile
+                    self.decoyed_missiles.add(idx)
+                    print(f"t={t:.2f}s: Chaff deployed - Missile {idx+1} lost lock!")
+
+                self.active_chaff.append((aircraft_pos.copy(), t))
+                self.chaff_remaining -= 1
+                self.last_chaff_time = t
+
+    def get_decoy_position(self, missile_idx, t):
+        """Get the position a decoyed missile should track (flare or chaff)."""
+        # Find most recent flare
+        if self.active_flares:
+            return self.active_flares[-1][0]  # Return most recent flare position
+        elif self.active_chaff:
+            return self.active_chaff[-1][0]  # Return most recent chaff position
+        return None
+
+    def get_status(self):
+        """Get countermeasures status for display."""
+        return {
+            "flares": self.flares_remaining,
+            "chaff": self.chaff_remaining,
+            "active_flares": len(self.active_flares),
+            "active_chaff": len(self.active_chaff),
+            "decoyed": len(self.decoyed_missiles)
+        }
+
+
+# ============================================================================
 # GENERATE COUPLED TARGET AND MISSILE TRAJECTORIES
 # ============================================================================
 # Reset initialization flags before generating trajectory
@@ -911,6 +1098,26 @@ evasion_started = False
 evasion_start_time = None
 any_intercepted = False
 
+# Initialize countermeasures system
+cm_system = CountermeasuresSystem() if ENABLE_COUNTERMEASURES else None
+decoyed_missiles = set()
+ecm_noise = {}
+
+# Build guidance types dictionary for countermeasures
+guidance_types = {}
+for m in range(num_missiles):
+    if ENABLE_MULTI_MISSILE:
+        guidance_types[m] = MISSILE_CONFIGS[m]["guidance"]
+    else:
+        guidance_types[m] = GUIDANCE_ALGORITHM
+
+# Print countermeasures status
+if ENABLE_COUNTERMEASURES:
+    print(f"\nCountermeasures enabled:")
+    print(f"  - Flares: {FLARE_COUNT} (deploy at {FLARE_DEPLOY_DISTANCE}m)")
+    print(f"  - Chaff: {CHAFF_COUNT} (deploy at {CHAFF_DEPLOY_DISTANCE}m)")
+    print(f"  - ECM: {'ON' if ENABLE_ECM else 'OFF'} (range: {ECM_RANGE}m)")
+
 # For backwards compatibility - create single missile reference
 missile_states = all_missile_states[0]
 missile_velocities = all_missile_velocities[0]
@@ -956,6 +1163,23 @@ for i in range(1, n_points):
     else:
         target_accelerations[i] = np.zeros(3)
 
+    # ========== COUNTERMEASURES UPDATE ==========
+    if cm_system is not None:
+        # Gather active missile positions
+        active_missile_positions = []
+        active_missile_indices = []
+        for m in range(num_missiles):
+            if missile_launched[m] and not intercepted[m] and not missile_dead[m]:
+                active_missile_positions.append(all_missile_states[m, i-1])
+                active_missile_indices.append(m)
+
+        if active_missile_positions:
+            decoyed_missiles, ecm_noise = cm_system.update(
+                t, target_states[i], target_velocities[i],
+                active_missile_positions, active_missile_indices,
+                guidance_types, dt
+            )
+
     # ========== MISSILES UPDATE ==========
     for m in range(num_missiles):
         # Get launch time for this missile
@@ -983,22 +1207,40 @@ for i in range(1, n_points):
                 all_missile_speeds[m, i] = all_missile_speeds[m, i-1]
                 continue
 
-            # Get target info
-            target_pos = target_states[i]
-            target_vel = target_velocities[i]
-            target_accel = target_accelerations[i]
+            # Get target info (check if decoyed by countermeasures)
+            if m in decoyed_missiles and cm_system is not None:
+                # Missile is chasing a decoy instead of the real target
+                decoy_pos = cm_system.get_decoy_position(m, t)
+                if decoy_pos is not None:
+                    target_pos = decoy_pos
+                    target_vel = np.zeros(3)  # Decoys don't move much
+                    target_accel = np.zeros(3)
+                else:
+                    # Decoy expired, missile lost
+                    target_pos = target_states[i]
+                    target_vel = target_velocities[i]
+                    target_accel = target_accelerations[i]
+            else:
+                target_pos = target_states[i]
+                target_vel = target_velocities[i]
+                target_accel = target_accelerations[i]
 
-            # Check for intercept
-            distance = np.linalg.norm(target_pos - all_missile_states[m, i-1])
-            if distance < kill_dist and intercept_times[m] is None:
+            # Apply ECM noise to target position if affected
+            if m in ecm_noise:
+                noise = ecm_noise[m]
+                target_pos = target_pos + noise * 500  # Scale noise to position offset
+
+            # Check for intercept (only against real target, not decoys)
+            real_distance = np.linalg.norm(target_states[i] - all_missile_states[m, i-1])
+            if real_distance < kill_dist and intercept_times[m] is None and m not in decoyed_missiles:
                 intercept_times[m] = t
                 intercept_indices[m] = i
                 intercepted[m] = True
                 any_intercepted = True
                 if ENABLE_MULTI_MISSILE:
-                    print(f"Missile {m+1} intercept at t = {t:.2f}s, distance = {distance:.1f}m")
+                    print(f"Missile {m+1} intercept at t = {t:.2f}s, distance = {real_distance:.1f}m")
                 else:
-                    print(f"Intercept at t = {t:.2f}s, distance = {distance:.1f}m")
+                    print(f"Intercept at t = {t:.2f}s, distance = {real_distance:.1f}m")
                 all_missile_states[m, i] = all_missile_states[m, i-1]
                 all_missile_velocities[m, i] = all_missile_velocities[m, i-1]
                 all_missile_speeds[m, i] = all_missile_speeds[m, i-1]
@@ -1067,11 +1309,26 @@ intercept_index = intercept_indices[0]
 print(f"\n--- Simulation Results ---")
 for m in range(num_missiles):
     final_dist = np.linalg.norm(target_states[-1] - all_missile_states[m, -1])
-    status = "HIT" if intercepted[m] else ("DEAD" if missile_dead[m] else "MISS")
+    if intercepted[m]:
+        status = "HIT"
+    elif m in decoyed_missiles:
+        status = "DECOYED"
+    elif missile_dead[m]:
+        status = "DEAD"
+    else:
+        status = "MISS"
     if ENABLE_MULTI_MISSILE:
         print(f"Missile {m+1}: {status}, final distance: {final_dist:.1f}m")
     else:
-        print(f"Final miss distance: {final_dist:.1f}m")
+        print(f"Result: {status}, final distance: {final_dist:.1f}m")
+
+# Print countermeasures summary
+if ENABLE_COUNTERMEASURES and cm_system is not None:
+    cm_status = cm_system.get_status()
+    print(f"\n--- Countermeasures Summary ---")
+    print(f"Flares used: {FLARE_COUNT - cm_status['flares']} / {FLARE_COUNT}")
+    print(f"Chaff used: {CHAFF_COUNT - cm_status['chaff']} / {CHAFF_COUNT}")
+    print(f"Missiles decoyed: {cm_status['decoyed']} / {num_missiles}")
 
 # ============================================================================
 # CREATE 3D PLOT
@@ -1139,6 +1396,7 @@ distance_text = ax.text2D(0.02, 0.80, '', transform=ax.transAxes, fontsize=10)
 algo_text = ax.text2D(0.02, 0.75, f'Missiles: {num_missiles}' if ENABLE_MULTI_MISSILE else f'Algorithm: {GUIDANCE_ALGORITHM}', transform=ax.transAxes, fontsize=10, color='purple')
 physics_text = ax.text2D(0.02, 0.70, f'Physics: {"ON" if ENABLE_PHYSICS else "OFF"}', transform=ax.transAxes, fontsize=10, color='green' if ENABLE_PHYSICS else 'gray')
 evasion_text = ax.text2D(0.02, 0.65, f'Evasion: {EVASION_PATTERN if ENABLE_EVASION else "OFF"}', transform=ax.transAxes, fontsize=10, color='orange' if ENABLE_EVASION else 'gray')
+cm_text = ax.text2D(0.02, 0.60, '', transform=ax.transAxes, fontsize=10, color='cyan') if ENABLE_COUNTERMEASURES else None
 
 # Starting position markers
 ax.scatter(target_states[0, 0], target_states[0, 1], target_states[0, 2],
@@ -1185,8 +1443,12 @@ def init():
     speed_text.set_text('')
     missile_speed_text.set_text('')
     distance_text.set_text('')
+    if cm_text is not None:
+        cm_text.set_text('')
 
     artists = [target_point, target_trail] + missile_points + missile_trails + [time_text, speed_text, missile_speed_text, distance_text]
+    if cm_text is not None:
+        artists.append(cm_text)
     return tuple(artists)
 
 
@@ -1238,7 +1500,14 @@ def update(frame):
     missile_speed_text.set_text(missile_speed_str)
     distance_text.set_text(f'Closest = {min_distance:.1f} m')
 
+    # Update countermeasures status
+    if cm_text is not None and cm_system is not None:
+        cm_status = cm_system.get_status()
+        cm_text.set_text(f'CM: F={cm_status["flares"]} C={cm_status["chaff"]} D={cm_status["decoyed"]}')
+
     artists = [target_point, target_trail] + missile_points + missile_trails + [time_text, speed_text, missile_speed_text, distance_text]
+    if cm_text is not None:
+        artists.append(cm_text)
     return tuple(artists)
 
 
