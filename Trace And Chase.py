@@ -48,6 +48,43 @@ THRUST_ACCELERATION = 50.0  # m/s^2 acceleration from thrust (when fuel availabl
 MIN_MISSILE_SPEED = 100.0  # m/s
 
 # ============================================================================
+# EVASIVE MANEUVERS SETTINGS
+# ============================================================================
+# Enable evasive maneuvers for the target aircraft
+ENABLE_EVASION = True
+
+# Available evasion patterns:
+# - "none"          : No evasion (original trajectory)
+# - "jinking"       : Random direction changes (zigzag)
+# - "barrel_roll"   : Spiral/corkscrew motion
+# - "break_turn"    : Hard turn when missile gets close
+# - "weave"         : Sinusoidal weaving pattern
+# - "split_s"       : Dive and reverse direction
+# - "random"        : Randomly switch between patterns
+
+EVASION_PATTERN = "jinking"  # Select evasion pattern
+
+# Evasion parameters
+EVASION_START_DISTANCE = 5000.0  # Start evading when missile is this close (m)
+EVASION_INTENSITY = 1.0  # Multiplier for evasion magnitude (0.5 = mild, 2.0 = aggressive)
+
+# Jinking parameters
+JINK_INTERVAL = 2.0  # seconds between direction changes
+JINK_AMPLITUDE = 500.0  # maximum lateral displacement (m)
+
+# Barrel roll parameters
+BARREL_ROLL_RADIUS = 300.0  # radius of the roll (m)
+BARREL_ROLL_RATE = 0.5  # rolls per second
+
+# Break turn parameters
+BREAK_TURN_RATE = 8.0  # degrees per second
+BREAK_TURN_DISTANCE = 3000.0  # trigger distance for break turn
+
+# Weave parameters
+WEAVE_FREQUENCY = 0.3  # Hz
+WEAVE_AMPLITUDE = 400.0  # meters
+
+# ============================================================================
 # Variables
 # ============================================================================
 Straight_time = 25      # Duration of first straight segment (s)
@@ -582,7 +619,145 @@ def apply_physics(position, velocity, desired_direction, dt, time_since_launch):
 
 
 # ============================================================================
-# GENERATE TARGET TRAJECTORY Array
+# EVASIVE MANEUVER FUNCTIONS
+# ============================================================================
+
+# Random seed for reproducible evasion patterns
+np.random.seed(42)
+jink_directions = np.random.choice([-1, 1], size=1000)  # Pre-generate jink directions
+random_pattern_switches = np.random.choice(['jinking', 'weave', 'barrel_roll'], size=100)
+
+def calculate_evasion_offset(t, base_position, base_velocity, missile_position, evasion_start_time):
+    """
+    Calculate evasion offset to add to the base trajectory.
+
+    Parameters:
+    - t: current time
+    - base_position: position from base trajectory
+    - base_velocity: velocity direction from base trajectory
+    - missile_position: current missile position
+    - evasion_start_time: time when evasion started
+
+    Returns:
+    - offset: 3D offset vector to add to base position
+    """
+    if not ENABLE_EVASION or EVASION_PATTERN == "none":
+        return np.zeros(3)
+
+    # Check if missile is close enough to trigger evasion
+    if missile_position is not None:
+        distance_to_missile = np.linalg.norm(base_position - missile_position)
+        if distance_to_missile > EVASION_START_DISTANCE:
+            return np.zeros(3)
+
+    # Time since evasion started
+    if evasion_start_time is None:
+        return np.zeros(3)
+    evasion_time = t - evasion_start_time
+
+    # Calculate perpendicular directions to velocity
+    vel_norm = np.linalg.norm(base_velocity)
+    if vel_norm < 1e-6:
+        return np.zeros(3)
+
+    vel_unit = base_velocity / vel_norm
+
+    # Find perpendicular vectors (lateral and vertical relative to velocity)
+    if abs(vel_unit[2]) < 0.9:
+        up = np.array([0, 0, 1])
+    else:
+        up = np.array([1, 0, 0])
+
+    lateral = np.cross(vel_unit, up)
+    lateral = lateral / np.linalg.norm(lateral)
+    vertical = np.cross(lateral, vel_unit)
+    vertical = vertical / np.linalg.norm(vertical)
+
+    offset = np.zeros(3)
+    pattern = EVASION_PATTERN
+
+    # Handle random pattern switching
+    if pattern == "random":
+        pattern_idx = int(evasion_time / 3.0) % len(random_pattern_switches)
+        pattern = random_pattern_switches[pattern_idx]
+
+    if pattern == "jinking":
+        # Jinking: random lateral movements
+        jink_idx = int(evasion_time / JINK_INTERVAL) % len(jink_directions)
+        direction = jink_directions[jink_idx]
+
+        # Smooth transition between jinks using sine
+        phase = (evasion_time % JINK_INTERVAL) / JINK_INTERVAL
+        smooth_factor = np.sin(phase * np.pi)
+
+        amplitude = JINK_AMPLITUDE * EVASION_INTENSITY
+        offset = lateral * direction * amplitude * smooth_factor
+
+        # Add some vertical component too
+        offset += vertical * direction * 0.3 * amplitude * smooth_factor
+
+    elif pattern == "barrel_roll":
+        # Barrel roll: spiral motion around velocity axis
+        roll_angle = 2 * np.pi * BARREL_ROLL_RATE * evasion_time
+        radius = BARREL_ROLL_RADIUS * EVASION_INTENSITY
+
+        offset = (lateral * np.cos(roll_angle) + vertical * np.sin(roll_angle)) * radius
+
+    elif pattern == "break_turn":
+        # Break turn: hard turn when missile is very close
+        if missile_position is not None:
+            distance = np.linalg.norm(base_position - missile_position)
+            if distance < BREAK_TURN_DISTANCE:
+                # Determine break direction (away from missile)
+                to_missile = missile_position - base_position
+                to_missile_norm = to_missile / np.linalg.norm(to_missile)
+
+                # Break perpendicular to missile direction
+                break_dir = np.cross(vel_unit, to_missile_norm)
+                if np.linalg.norm(break_dir) > 1e-6:
+                    break_dir = break_dir / np.linalg.norm(break_dir)
+                else:
+                    break_dir = lateral
+
+                # Intensity increases as missile gets closer
+                intensity = (BREAK_TURN_DISTANCE - distance) / BREAK_TURN_DISTANCE
+                turn_amount = np.radians(BREAK_TURN_RATE) * evasion_time * EVASION_INTENSITY
+                offset = break_dir * np.sin(turn_amount) * 1000 * intensity
+
+    elif pattern == "weave":
+        # Weave: sinusoidal lateral movement
+        amplitude = WEAVE_AMPLITUDE * EVASION_INTENSITY
+        phase = 2 * np.pi * WEAVE_FREQUENCY * evasion_time
+
+        offset = lateral * np.sin(phase) * amplitude
+        # Add vertical weave component (out of phase)
+        offset += vertical * np.sin(phase + np.pi/3) * amplitude * 0.5
+
+    elif pattern == "split_s":
+        # Split-S: dive and pull through
+        # Phase 1: roll inverted (first 2 seconds)
+        # Phase 2: pull through dive (2-5 seconds)
+        # Phase 3: level out in opposite direction
+
+        if evasion_time < 2.0:
+            # Rolling phase
+            roll_progress = evasion_time / 2.0
+            offset = vertical * (-500 * roll_progress * EVASION_INTENSITY)
+        elif evasion_time < 5.0:
+            # Diving phase
+            dive_time = evasion_time - 2.0
+            dive_progress = dive_time / 3.0
+            offset = vertical * (-500 - 1000 * dive_progress) * EVASION_INTENSITY
+            offset += lateral * 200 * np.sin(dive_progress * np.pi) * EVASION_INTENSITY
+        else:
+            # Level out (maintain offset)
+            offset = vertical * (-1500) * EVASION_INTENSITY
+
+    return offset
+
+
+# ============================================================================
+# GENERATE COUPLED TARGET AND MISSILE TRAJECTORIES
 # ============================================================================
 # Reset initialization flags before generating trajectory
 curve_initialized = False
@@ -592,25 +767,19 @@ straight2_initialized = False
 times = np.arange(0, tmax, dt)
 n_points = len(times)
 
-# Generate target states using regular for loop
-target_states = np.zeros((n_points, 3))
+# First pass: Generate base target trajectory (without evasion)
+base_target_states = np.zeros((n_points, 3))
 for i in range(n_points):
     t = times[i]
-    target_states[i] = target_location(t, target_states[:i])
+    base_target_states[i] = target_location(t, base_target_states[:i])
 
-# Calculate target velocities (for guidance algorithms that need it)
-target_velocities = np.zeros((n_points, 3))
+# Calculate base velocities
+base_target_velocities = np.zeros((n_points, 3))
 for i in range(1, n_points):
-    target_velocities[i] = (target_states[i] - target_states[i-1]) / dt
-target_velocities[0] = target_velocities[1]  # Copy first velocity
+    base_target_velocities[i] = (base_target_states[i] - base_target_states[i-1]) / dt
+base_target_velocities[0] = base_target_velocities[1]
 
-# Calculate target accelerations (for APN)
-target_accelerations = np.zeros((n_points, 3))
-for i in range(1, n_points):
-    target_accelerations[i] = (target_velocities[i] - target_velocities[i-1]) / dt
-target_accelerations[0] = target_accelerations[1]
-
-print(f"Generated {n_points} trajectory points over {tmax:.1f} seconds")
+print(f"Generated {n_points} base trajectory points over {tmax:.1f} seconds")
 print(f"Aircraft start: ({aircraft_start_loc[0]:.1f}, {aircraft_start_loc[1]:.1f}, {aircraft_start_loc[2]:.1f})")
 print(f"Curve start: ({curve_start_x:.1f}, {curve_start_y:.1f}, {curve_start_z:.1f})")
 print(f"Straight2 start: ({straight2_start_x:.1f}, {straight2_start_y:.1f}, {straight2_start_z:.1f})")
@@ -628,20 +797,38 @@ if ENABLE_PHYSICS:
 else:
     print(f"\nPhysics disabled (ideal motion)")
 
+# Print evasion settings
+if ENABLE_EVASION and EVASION_PATTERN != "none":
+    print(f"\nEvasion enabled:")
+    print(f"  - Pattern: {EVASION_PATTERN}")
+    print(f"  - Start distance: {EVASION_START_DISTANCE} m")
+    print(f"  - Intensity: {EVASION_INTENSITY}")
+else:
+    print(f"\nEvasion disabled")
+
 # ============================================================================
-# GENERATE MISSILE TRAJECTORY
+# COUPLED SIMULATION (Target with evasion + Missile)
 # ============================================================================
+# Initialize arrays
+target_states = np.zeros((n_points, 3))
+target_velocities = np.zeros((n_points, 3))
+target_accelerations = np.zeros((n_points, 3))
 missile_states = np.zeros((n_points, 3))
-missile_velocities = np.zeros((n_points, 3))  # Track velocity for physics
-missile_speeds = np.zeros(n_points)  # Track speed for display
+missile_velocities = np.zeros((n_points, 3))
+missile_speeds = np.zeros(n_points)
+
+# Initial conditions
+target_states[0] = base_target_states[0]
+target_velocities[0] = base_target_velocities[0]
 missile_states[0] = missile_start_loc
 
-# Initial velocity (pointing toward target)
+# Initial missile velocity (pointing toward target)
 initial_direction = target_states[0] - missile_start_loc
 initial_direction = initial_direction / np.linalg.norm(initial_direction)
 missile_velocities[0] = initial_direction * miss_vel
 missile_speeds[0] = miss_vel
 
+# Simulation state
 missile_launched = False
 missile_launch_index = 0
 intercept_time = None
@@ -649,7 +836,9 @@ intercept_index = None
 intercepted = False
 missile_dead = False
 missile_dead_time = None
-prev_los = None  # For PN algorithms
+prev_los = None
+evasion_started = False
+evasion_start_time = None
 
 # Get the selected guidance function
 guidance_func = get_guidance_function(GUIDANCE_ALGORITHM)
@@ -657,6 +846,40 @@ guidance_func = get_guidance_function(GUIDANCE_ALGORITHM)
 for i in range(1, n_points):
     t = times[i]
 
+    # ========== TARGET UPDATE ==========
+    # Get base trajectory position and velocity
+    base_pos = base_target_states[i]
+    base_vel = base_target_velocities[i]
+
+    # Check if evasion should start
+    if ENABLE_EVASION and EVASION_PATTERN != "none" and missile_launched and not intercepted:
+        distance_to_missile = np.linalg.norm(base_pos - missile_states[i-1])
+        if distance_to_missile <= EVASION_START_DISTANCE and not evasion_started:
+            evasion_started = True
+            evasion_start_time = t
+            print(f"Evasion started at t = {t:.2f}s (missile at {distance_to_missile:.0f}m)")
+
+    # Calculate evasion offset
+    if evasion_started:
+        evasion_offset = calculate_evasion_offset(
+            t, base_pos, base_vel, missile_states[i-1], evasion_start_time
+        )
+    else:
+        evasion_offset = np.zeros(3)
+
+    # Apply evasion to target position
+    target_states[i] = base_pos + evasion_offset
+
+    # Calculate actual velocity (includes evasion motion)
+    target_velocities[i] = (target_states[i] - target_states[i-1]) / dt
+
+    # Calculate acceleration
+    if i > 1:
+        target_accelerations[i] = (target_velocities[i] - target_velocities[i-1]) / dt
+    else:
+        target_accelerations[i] = np.zeros(3)
+
+    # ========== MISSILE UPDATE ==========
     # Check if missile should launch
     if t >= missile_launch_time and not missile_launched:
         missile_launched = True
@@ -780,6 +1003,7 @@ missile_speed_text = ax.text2D(0.02, 0.85, '', transform=ax.transAxes, fontsize=
 distance_text = ax.text2D(0.02, 0.80, '', transform=ax.transAxes, fontsize=10)
 algo_text = ax.text2D(0.02, 0.75, f'Algorithm: {GUIDANCE_ALGORITHM}', transform=ax.transAxes, fontsize=10, color='purple')
 physics_text = ax.text2D(0.02, 0.70, f'Physics: {"ON" if ENABLE_PHYSICS else "OFF"}', transform=ax.transAxes, fontsize=10, color='green' if ENABLE_PHYSICS else 'gray')
+evasion_text = ax.text2D(0.02, 0.65, f'Evasion: {EVASION_PATTERN if ENABLE_EVASION else "OFF"}', transform=ax.transAxes, fontsize=10, color='orange' if ENABLE_EVASION else 'gray')
 
 # Starting position markers
 ax.scatter(target_states[0, 0], target_states[0, 1], target_states[0, 2],
