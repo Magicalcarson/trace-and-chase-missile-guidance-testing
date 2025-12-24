@@ -168,6 +168,37 @@ CM_SUSCEPTIBILITY = {
 }
 
 # ============================================================================
+# MONTE CARLO ANALYSIS SETTINGS
+# ============================================================================
+# Enable Monte Carlo mode (runs multiple simulations for statistical analysis)
+ENABLE_MONTE_CARLO = False  # Set to True to run Monte Carlo analysis
+
+# Number of simulation runs
+MONTE_CARLO_RUNS = 100
+
+# Parameter randomization settings
+MC_RANDOMIZE_MISSILE_POS = True  # Randomize missile starting position
+MC_MISSILE_POS_VARIANCE = 2000.0  # Standard deviation in meters
+
+MC_RANDOMIZE_TARGET_POS = True  # Randomize target starting position
+MC_TARGET_POS_VARIANCE = 500.0  # Standard deviation in meters
+
+MC_RANDOMIZE_VELOCITIES = True  # Randomize initial velocities
+MC_VELOCITY_VARIANCE = 50.0  # Standard deviation in m/s
+
+MC_RANDOMIZE_EVASION = True  # Randomize evasion parameters
+MC_EVASION_PATTERNS = ["none", "jinking", "weave", "barrel_roll", "break_turn"]
+
+MC_RANDOMIZE_GUIDANCE = True  # Test different guidance algorithms
+MC_GUIDANCE_ALGORITHMS = ["pure_pursuit", "lead_pursuit", "proportional_navigation", "augmented_pn"]
+
+# Statistical output options
+MC_SHOW_HISTOGRAMS = True
+MC_SHOW_SCATTER = True
+MC_SAVE_RESULTS = False  # Save results to CSV file
+MC_RESULTS_FILE = "monte_carlo_results.csv"
+
+# ============================================================================
 # Variables
 # ============================================================================
 Straight_time = 25      # Duration of first straight segment (s)
@@ -981,6 +1012,468 @@ class CountermeasuresSystem:
             "decoyed": len(self.decoyed_missiles)
         }
 
+
+# ============================================================================
+# MONTE CARLO SIMULATION FUNCTIONS
+# ============================================================================
+
+def run_single_simulation(params, verbose=False):
+    """
+    Run a single simulation with given parameters.
+
+    Parameters:
+    - params: dict with simulation parameters (missile_pos, target_pos, guidance, evasion, etc.)
+    - verbose: print progress info
+
+    Returns:
+    - results: dict with simulation outcomes (hit, miss_distance, time_to_intercept, etc.)
+    """
+    global curve_start_x, curve_start_y, curve_start_z, curve_initialized
+    global straight2_start_x, straight2_start_y, straight2_start_z, straight2_initialized
+    global center_x, center_y, center_z
+
+    # Reset initialization flags
+    curve_initialized = False
+    straight2_initialized = False
+
+    # Extract parameters
+    sim_missile_pos = params.get("missile_pos", missile_start_loc.copy())
+    sim_target_pos = params.get("target_pos", aircraft_start_loc.copy())
+    sim_guidance = params.get("guidance", GUIDANCE_ALGORITHM)
+    sim_evasion = params.get("evasion", EVASION_PATTERN)
+    sim_miss_vel = params.get("missile_vel", miss_vel)
+    sim_targ_vel = params.get("target_vel", targ_vel)
+
+    # Time array
+    times = np.arange(0, tmax, dt)
+    n_points = len(times)
+
+    # Generate base target trajectory
+    base_target_states = np.zeros((n_points, 3))
+
+    # Temporarily modify aircraft_start_loc for this simulation
+    original_aircraft_start = aircraft_start_loc.copy()
+
+    for i in range(n_points):
+        t = times[i]
+        # Calculate position with offset
+        if 0 <= t <= Straight_time:
+            x = sim_target_pos[0] + sim_targ_vel * t
+            y = sim_target_pos[1]
+            z = sim_target_pos[2]
+        else:
+            # For curve and straight2, use target_location function with initialized values
+            base_target_states[i] = target_location(t, base_target_states[:i])
+            continue
+        base_target_states[i] = np.array([x, y, z])
+
+    # Calculate velocities
+    base_target_velocities = np.zeros((n_points, 3))
+    for i in range(1, n_points):
+        base_target_velocities[i] = (base_target_states[i] - base_target_states[i-1]) / dt
+    base_target_velocities[0] = base_target_velocities[1]
+
+    # Initialize arrays
+    target_states = np.zeros((n_points, 3))
+    target_velocities = np.zeros((n_points, 3))
+    target_accelerations = np.zeros((n_points, 3))
+
+    missile_states = np.zeros((n_points, 3))
+    missile_velocities = np.zeros((n_points, 3))
+    missile_speeds = np.zeros(n_points)
+
+    # Initial conditions
+    target_states[0] = base_target_states[0]
+    target_velocities[0] = base_target_velocities[0]
+
+    missile_states[0] = sim_missile_pos
+    initial_direction = base_target_states[0] - sim_missile_pos
+    if np.linalg.norm(initial_direction) > 0:
+        initial_direction = initial_direction / np.linalg.norm(initial_direction)
+    else:
+        initial_direction = np.array([1, 0, 0])
+    missile_velocities[0] = initial_direction * sim_miss_vel
+    missile_speeds[0] = sim_miss_vel
+
+    # Get guidance function
+    guidance_func = get_guidance_function(sim_guidance)
+
+    # State tracking
+    prev_los = None
+    missile_launched = False
+    launch_index = 0
+    intercept_time = None
+    intercept_index = None
+    intercepted = False
+    missile_dead = False
+    missile_dead_time = None
+
+    # Evasion state
+    evasion_started = False
+    evasion_start_time = None
+    original_evasion_pattern = EVASION_PATTERN
+
+    # Initialize countermeasures
+    cm_system = CountermeasuresSystem() if ENABLE_COUNTERMEASURES else None
+    decoyed = False
+
+    # Run simulation
+    for i in range(1, n_points):
+        t = times[i]
+
+        # Target update
+        base_pos = base_target_states[i]
+        base_vel = base_target_velocities[i]
+
+        # Check evasion
+        if sim_evasion != "none" and not intercepted:
+            distance = np.linalg.norm(base_pos - missile_states[i-1])
+            if distance <= EVASION_START_DISTANCE and not evasion_started:
+                evasion_started = True
+                evasion_start_time = t
+
+            if evasion_started:
+                # Calculate evasion offset based on pattern
+                evasion_offset = calculate_evasion_offset(
+                    t, base_pos, base_vel, missile_states[i-1], evasion_start_time
+                )
+            else:
+                evasion_offset = np.zeros(3)
+        else:
+            evasion_offset = np.zeros(3)
+
+        target_states[i] = base_pos + evasion_offset
+        target_velocities[i] = (target_states[i] - target_states[i-1]) / dt
+
+        if i > 1:
+            target_accelerations[i] = (target_velocities[i] - target_velocities[i-1]) / dt
+
+        # Countermeasures update
+        if cm_system is not None and not intercepted and not missile_dead:
+            _, ecm_noise = cm_system.update(
+                t, target_states[i], target_velocities[i],
+                [missile_states[i-1]], [0], {0: sim_guidance}, dt
+            )
+            if 0 in cm_system.decoyed_missiles:
+                decoyed = True
+
+        # Missile launch
+        if t >= missile_launch_time and not missile_launched:
+            missile_launched = True
+            launch_index = i
+
+        if missile_launched:
+            if intercepted or missile_dead:
+                missile_states[i] = missile_states[i-1]
+                missile_velocities[i] = missile_velocities[i-1]
+                missile_speeds[i] = missile_speeds[i-1]
+                continue
+
+            # Get target position (possibly decoyed)
+            if decoyed and cm_system is not None:
+                decoy_pos = cm_system.get_decoy_position(0, t)
+                if decoy_pos is not None:
+                    target_pos = decoy_pos
+                    target_vel = np.zeros(3)
+                    target_accel = np.zeros(3)
+                else:
+                    target_pos = target_states[i]
+                    target_vel = target_velocities[i]
+                    target_accel = target_accelerations[i]
+            else:
+                target_pos = target_states[i]
+                target_vel = target_velocities[i]
+                target_accel = target_accelerations[i]
+
+            # Check intercept (real target only)
+            real_distance = np.linalg.norm(target_states[i] - missile_states[i-1])
+            if real_distance < kill_dist and intercept_time is None and not decoyed:
+                intercept_time = t
+                intercept_index = i
+                intercepted = True
+                missile_states[i] = missile_states[i-1]
+                missile_velocities[i] = missile_velocities[i-1]
+                missile_speeds[i] = missile_speeds[i-1]
+                continue
+
+            # Apply guidance
+            if sim_guidance == "augmented_pn":
+                guided_pos, prev_los = augmented_pn_guidance(
+                    missile_states[i-1], target_pos, target_vel,
+                    sim_miss_vel, dt, prev_los, target_accel
+                )
+            else:
+                guided_pos, prev_los = guidance_func(
+                    missile_states[i-1], target_pos, target_vel,
+                    sim_miss_vel, dt, prev_los
+                )
+
+            # Calculate desired direction
+            desired_direction = guided_pos - missile_states[i-1]
+            dir_norm = np.linalg.norm(desired_direction)
+            if dir_norm > 1e-6:
+                desired_direction = desired_direction / dir_norm
+            else:
+                desired_direction = prev_los if prev_los is not None else np.array([1, 0, 0])
+
+            # Apply physics
+            time_since_launch = t - times[launch_index]
+            new_pos, new_vel, is_alive = apply_physics(
+                missile_states[i-1],
+                missile_velocities[i-1],
+                desired_direction,
+                dt,
+                time_since_launch
+            )
+
+            if not is_alive and not missile_dead:
+                missile_dead = True
+                missile_dead_time = t
+
+            missile_states[i] = new_pos
+            missile_velocities[i] = new_vel
+            missile_speeds[i] = np.linalg.norm(new_vel)
+        else:
+            missile_states[i] = sim_missile_pos
+            missile_velocities[i] = missile_velocities[0]
+            missile_speeds[i] = sim_miss_vel
+
+    # Calculate final results
+    final_distance = np.linalg.norm(target_states[-1] - missile_states[-1])
+    min_distance = np.min([np.linalg.norm(target_states[i] - missile_states[i])
+                          for i in range(n_points)])
+
+    results = {
+        "hit": intercepted,
+        "decoyed": decoyed,
+        "missile_dead": missile_dead,
+        "intercept_time": intercept_time,
+        "final_distance": final_distance,
+        "min_distance": min_distance,
+        "guidance": sim_guidance,
+        "evasion": sim_evasion,
+        "missile_pos": sim_missile_pos.copy(),
+        "target_pos": sim_target_pos.copy(),
+    }
+
+    return results
+
+
+def run_monte_carlo_analysis():
+    """
+    Run Monte Carlo analysis with multiple simulations.
+    Returns statistics and generates visualizations.
+    """
+    print("\n" + "="*60)
+    print("MONTE CARLO ANALYSIS")
+    print("="*60)
+    print(f"Running {MONTE_CARLO_RUNS} simulations...")
+
+    rng = np.random.default_rng(42)  # Reproducible results
+    results_list = []
+
+    start_time = time.time()
+
+    for run in range(MONTE_CARLO_RUNS):
+        # Generate randomized parameters
+        params = {}
+
+        # Randomize missile position
+        if MC_RANDOMIZE_MISSILE_POS:
+            offset = rng.normal(0, MC_MISSILE_POS_VARIANCE, 3)
+            params["missile_pos"] = missile_start_loc + offset
+        else:
+            params["missile_pos"] = missile_start_loc.copy()
+
+        # Randomize target position
+        if MC_RANDOMIZE_TARGET_POS:
+            offset = rng.normal(0, MC_TARGET_POS_VARIANCE, 3)
+            params["target_pos"] = aircraft_start_loc + offset
+        else:
+            params["target_pos"] = aircraft_start_loc.copy()
+
+        # Randomize velocities
+        if MC_RANDOMIZE_VELOCITIES:
+            params["missile_vel"] = miss_vel + rng.normal(0, MC_VELOCITY_VARIANCE)
+            params["target_vel"] = targ_vel + rng.normal(0, MC_VELOCITY_VARIANCE)
+        else:
+            params["missile_vel"] = miss_vel
+            params["target_vel"] = targ_vel
+
+        # Randomize guidance algorithm
+        if MC_RANDOMIZE_GUIDANCE:
+            params["guidance"] = rng.choice(MC_GUIDANCE_ALGORITHMS)
+        else:
+            params["guidance"] = GUIDANCE_ALGORITHM
+
+        # Randomize evasion pattern
+        if MC_RANDOMIZE_EVASION:
+            params["evasion"] = rng.choice(MC_EVASION_PATTERNS)
+        else:
+            params["evasion"] = EVASION_PATTERN
+
+        # Run simulation
+        result = run_single_simulation(params, verbose=False)
+        results_list.append(result)
+
+        # Progress update
+        if (run + 1) % 10 == 0:
+            print(f"  Completed {run + 1}/{MONTE_CARLO_RUNS} simulations...")
+
+    elapsed = time.time() - start_time
+    print(f"\nCompleted in {elapsed:.2f} seconds")
+
+    # Analyze results
+    hits = sum(1 for r in results_list if r["hit"])
+    decoyed = sum(1 for r in results_list if r["decoyed"])
+    dead = sum(1 for r in results_list if r["missile_dead"])
+    misses = MONTE_CARLO_RUNS - hits - decoyed - dead
+
+    hit_rate = hits / MONTE_CARLO_RUNS * 100
+    decoy_rate = decoyed / MONTE_CARLO_RUNS * 100
+    dead_rate = dead / MONTE_CARLO_RUNS * 100
+
+    min_distances = [r["min_distance"] for r in results_list]
+    final_distances = [r["final_distance"] for r in results_list]
+    intercept_times = [r["intercept_time"] for r in results_list if r["intercept_time"] is not None]
+
+    print("\n--- MONTE CARLO RESULTS ---")
+    print(f"Total Runs: {MONTE_CARLO_RUNS}")
+    print(f"Hits: {hits} ({hit_rate:.1f}%)")
+    print(f"Decoyed: {decoyed} ({decoy_rate:.1f}%)")
+    print(f"Missile Dead: {dead} ({dead_rate:.1f}%)")
+    print(f"Misses: {misses} ({misses/MONTE_CARLO_RUNS*100:.1f}%)")
+    print(f"\nMinimum Distance Stats:")
+    print(f"  Mean: {np.mean(min_distances):.1f} m")
+    print(f"  Std Dev: {np.std(min_distances):.1f} m")
+    print(f"  Min: {np.min(min_distances):.1f} m")
+    print(f"  Max: {np.max(min_distances):.1f} m")
+
+    if intercept_times:
+        print(f"\nIntercept Time Stats (hits only):")
+        print(f"  Mean: {np.mean(intercept_times):.2f} s")
+        print(f"  Std Dev: {np.std(intercept_times):.2f} s")
+
+    # Results by guidance algorithm
+    print("\n--- Results by Guidance Algorithm ---")
+    for guidance in MC_GUIDANCE_ALGORITHMS:
+        guidance_results = [r for r in results_list if r["guidance"] == guidance]
+        if guidance_results:
+            g_hits = sum(1 for r in guidance_results if r["hit"])
+            g_total = len(guidance_results)
+            print(f"  {guidance}: {g_hits}/{g_total} hits ({g_hits/g_total*100:.1f}%)")
+
+    # Results by evasion pattern
+    print("\n--- Results by Evasion Pattern ---")
+    for evasion in MC_EVASION_PATTERNS:
+        evasion_results = [r for r in results_list if r["evasion"] == evasion]
+        if evasion_results:
+            e_hits = sum(1 for r in evasion_results if r["hit"])
+            e_total = len(evasion_results)
+            print(f"  {evasion}: {e_hits}/{e_total} hits ({e_hits/e_total*100:.1f}%)")
+
+    # Generate visualizations
+    if MC_SHOW_HISTOGRAMS or MC_SHOW_SCATTER:
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        fig.suptitle(f'Monte Carlo Analysis Results ({MONTE_CARLO_RUNS} runs)', fontsize=14)
+
+        # Histogram of minimum distances
+        ax1 = axes[0, 0]
+        ax1.hist(min_distances, bins=30, edgecolor='black', alpha=0.7)
+        ax1.axvline(kill_dist, color='red', linestyle='--', label=f'Kill Distance ({kill_dist}m)')
+        ax1.set_xlabel('Minimum Distance (m)')
+        ax1.set_ylabel('Frequency')
+        ax1.set_title('Distribution of Minimum Distances')
+        ax1.legend()
+
+        # Pie chart of outcomes
+        ax2 = axes[0, 1]
+        labels = ['Hit', 'Decoyed', 'Missile Dead', 'Miss']
+        sizes = [hits, decoyed, dead, misses]
+        colors = ['green', 'orange', 'gray', 'red']
+        explode = (0.1, 0, 0, 0)
+        # Filter out zero values
+        non_zero = [(l, s, c, e) for l, s, c, e in zip(labels, sizes, colors, explode) if s > 0]
+        if non_zero:
+            labels, sizes, colors, explode = zip(*non_zero)
+            ax2.pie(sizes, explode=explode, labels=labels, colors=colors, autopct='%1.1f%%',
+                   shadow=True, startangle=90)
+        ax2.set_title('Engagement Outcomes')
+
+        # Hit rate by guidance algorithm
+        ax3 = axes[1, 0]
+        guidance_names = []
+        guidance_hit_rates = []
+        for guidance in MC_GUIDANCE_ALGORITHMS:
+            guidance_results = [r for r in results_list if r["guidance"] == guidance]
+            if guidance_results:
+                g_hits = sum(1 for r in guidance_results if r["hit"])
+                g_total = len(guidance_results)
+                guidance_names.append(guidance.replace('_', '\n'))
+                guidance_hit_rates.append(g_hits / g_total * 100)
+        bars = ax3.bar(guidance_names, guidance_hit_rates, color=['blue', 'green', 'orange', 'red'])
+        ax3.set_ylabel('Hit Rate (%)')
+        ax3.set_title('Hit Rate by Guidance Algorithm')
+        ax3.set_ylim(0, 100)
+        for bar, rate in zip(bars, guidance_hit_rates):
+            ax3.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1,
+                    f'{rate:.1f}%', ha='center', va='bottom', fontsize=9)
+
+        # Hit rate by evasion pattern
+        ax4 = axes[1, 1]
+        evasion_names = []
+        evasion_hit_rates = []
+        for evasion in MC_EVASION_PATTERNS:
+            evasion_results = [r for r in results_list if r["evasion"] == evasion]
+            if evasion_results:
+                e_hits = sum(1 for r in evasion_results if r["hit"])
+                e_total = len(evasion_results)
+                evasion_names.append(evasion.replace('_', '\n'))
+                evasion_hit_rates.append(e_hits / e_total * 100)
+        bars = ax4.bar(evasion_names, evasion_hit_rates, color=['gray', 'blue', 'green', 'orange', 'red'])
+        ax4.set_ylabel('Hit Rate (%)')
+        ax4.set_title('Hit Rate by Evasion Pattern')
+        ax4.set_ylim(0, 100)
+        for bar, rate in zip(bars, evasion_hit_rates):
+            ax4.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1,
+                    f'{rate:.1f}%', ha='center', va='bottom', fontsize=9)
+
+        plt.tight_layout()
+        plt.show()
+
+    # Save results to CSV if requested
+    if MC_SAVE_RESULTS:
+        import csv
+        with open(MC_RESULTS_FILE, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=results_list[0].keys())
+            writer.writeheader()
+            for result in results_list:
+                # Convert numpy arrays to lists for CSV
+                row = result.copy()
+                row["missile_pos"] = list(row["missile_pos"])
+                row["target_pos"] = list(row["target_pos"])
+                writer.writerow(row)
+        print(f"\nResults saved to {MC_RESULTS_FILE}")
+
+    return results_list
+
+
+# ============================================================================
+# MAIN EXECUTION
+# ============================================================================
+
+# Check if Monte Carlo mode is enabled
+if ENABLE_MONTE_CARLO:
+    # Run Monte Carlo analysis and exit
+    mc_results = run_monte_carlo_analysis()
+    print("\nMonte Carlo analysis complete. Exiting...")
+    import sys
+    sys.exit(0)
+
+# ============================================================================
+# STANDARD SIMULATION MODE
+# ============================================================================
+# If we reach here, we're running standard single simulation with visualization
 
 # ============================================================================
 # GENERATE COUPLED TARGET AND MISSILE TRAJECTORIES
