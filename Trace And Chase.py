@@ -4,6 +4,7 @@ from scipy.integrate import solve_ivp
 from scipy.interpolate import interp1d
 from matplotlib.animation import FuncAnimation
 from mpl_toolkits.mplot3d import Axes3D
+from matplotlib.widgets import Button, Slider, RadioButtons, CheckButtons
 import time
 
 # ============================================================================
@@ -197,6 +198,18 @@ MC_SHOW_HISTOGRAMS = True
 MC_SHOW_SCATTER = True
 MC_SAVE_RESULTS = False  # Save results to CSV file
 MC_RESULTS_FILE = "monte_carlo_results.csv"
+
+# ============================================================================
+# INTERACTIVE GUI SETTINGS
+# ============================================================================
+# Enable interactive control panel
+ENABLE_INTERACTIVE_GUI = True
+
+# GUI layout options
+GUI_PANEL_WIDTH = 0.25  # Width of control panel (0-1)
+GUI_SHOW_SLIDERS = True  # Show velocity sliders
+GUI_SHOW_BUTTONS = True  # Show play/pause/reset buttons
+GUI_SHOW_DROPDOWNS = True  # Show algorithm/evasion selectors
 
 # ============================================================================
 # Variables
@@ -2005,6 +2018,136 @@ def update(frame):
 
 
 # ============================================================================
+# INTERACTIVE GUI CONTROLS
+# ============================================================================
+if ENABLE_INTERACTIVE_GUI:
+    # Adjust figure layout to make room for controls
+    plt.subplots_adjust(left=0.05, right=0.75, bottom=0.15, top=0.95)
+
+    # Animation state
+    class AnimationState:
+        def __init__(self):
+            self.is_paused = False
+            self.current_frame = 0
+            self.speed_multiplier = 1.0
+            self.frame_list = None
+            self.anim = None
+
+    anim_state = AnimationState()
+
+    # Create control panel axes
+    ax_play = plt.axes([0.78, 0.85, 0.08, 0.04])
+    ax_pause = plt.axes([0.87, 0.85, 0.08, 0.04])
+    ax_reset = plt.axes([0.78, 0.80, 0.17, 0.04])
+
+    ax_speed = plt.axes([0.78, 0.70, 0.17, 0.03])
+    ax_time_slider = plt.axes([0.78, 0.60, 0.17, 0.03])
+    ax_elev = plt.axes([0.78, 0.50, 0.17, 0.03])
+    ax_azim = plt.axes([0.78, 0.40, 0.17, 0.03])
+
+    # Create buttons
+    btn_play = Button(ax_play, 'Play', color='lightgreen', hovercolor='green')
+    btn_pause = Button(ax_pause, 'Pause', color='lightyellow', hovercolor='yellow')
+    btn_reset = Button(ax_reset, 'Reset', color='lightcoral', hovercolor='red')
+
+    # Create sliders
+    slider_speed = Slider(ax_speed, 'Speed', 0.1, 5.0, valinit=1.0, valstep=0.1)
+    slider_time = Slider(ax_time_slider, 'Time', 0, tmax, valinit=0, valstep=dt*100)
+    slider_elev = Slider(ax_elev, 'Elevation', -90, 90, valinit=20, valstep=5)
+    slider_azim = Slider(ax_azim, 'Azimuth', 0, 360, valinit=45, valstep=5)
+
+    # Info text panel
+    ax_info = plt.axes([0.78, 0.15, 0.17, 0.20])
+    ax_info.set_facecolor('lightgray')
+    ax_info.set_xticks([])
+    ax_info.set_yticks([])
+    ax_info.set_title('Simulation Info', fontsize=10)
+
+    info_text = ax_info.text(0.05, 0.95,
+        f"Guidance: {GUIDANCE_ALGORITHM}\n"
+        f"Physics: {'ON' if ENABLE_PHYSICS else 'OFF'}\n"
+        f"Evasion: {EVASION_PATTERN}\n"
+        f"Missiles: {num_missiles}\n"
+        f"Target vel: {targ_vel} m/s\n"
+        f"Missile vel: {miss_vel} m/s",
+        transform=ax_info.transAxes, fontsize=8,
+        verticalalignment='top', family='monospace')
+
+    # Status indicator
+    ax_status = plt.axes([0.78, 0.10, 0.17, 0.04])
+    ax_status.set_facecolor('lightgray')
+    ax_status.set_xticks([])
+    ax_status.set_yticks([])
+    status_text = ax_status.text(0.5, 0.5, 'Status: Playing',
+        transform=ax_status.transAxes, fontsize=10,
+        horizontalalignment='center', verticalalignment='center')
+
+    def on_play(event):
+        """Resume animation."""
+        anim_state.is_paused = False
+        if anim_state.anim is not None:
+            anim_state.anim.resume()
+        status_text.set_text('Status: Playing')
+        fig.canvas.draw_idle()
+
+    def on_pause(event):
+        """Pause animation."""
+        anim_state.is_paused = True
+        if anim_state.anim is not None:
+            anim_state.anim.pause()
+        status_text.set_text('Status: Paused')
+        fig.canvas.draw_idle()
+
+    def on_reset(event):
+        """Reset animation to beginning."""
+        anim_state.current_frame = 0
+        slider_time.set_val(0)
+        update(0)
+        if anim_state.is_paused:
+            status_text.set_text('Status: Reset (Paused)')
+        else:
+            status_text.set_text('Status: Reset')
+        fig.canvas.draw_idle()
+
+    def on_speed_change(val):
+        """Change animation speed."""
+        anim_state.speed_multiplier = val
+        if anim_state.anim is not None:
+            anim_state.anim.event_source.interval = animation_interval / val
+
+    def on_time_change(val):
+        """Jump to specific time."""
+        frame_idx = int(val / tmax * (len(times) - 1))
+        frame_idx = max(0, min(frame_idx, len(times) - 1))
+        update(frame_idx)
+        fig.canvas.draw_idle()
+
+    def on_elev_change(val):
+        """Change view elevation."""
+        ax.view_init(elev=val, azim=slider_azim.val)
+        fig.canvas.draw_idle()
+
+    def on_azim_change(val):
+        """Change view azimuth."""
+        ax.view_init(elev=slider_elev.val, azim=val)
+        fig.canvas.draw_idle()
+
+    # Connect callbacks
+    btn_play.on_clicked(on_play)
+    btn_pause.on_clicked(on_pause)
+    btn_reset.on_clicked(on_reset)
+    slider_speed.on_changed(on_speed_change)
+    slider_time.on_changed(on_time_change)
+    slider_elev.on_changed(on_elev_change)
+    slider_azim.on_changed(on_azim_change)
+
+    print("Interactive GUI enabled:")
+    print("  - Play/Pause/Reset buttons")
+    print("  - Speed slider (0.1x - 5x)")
+    print("  - Time scrubber")
+    print("  - View angle controls")
+
+# ============================================================================
 # CREATE AND SHOW ANIMATION
 # ============================================================================
 # Skip frames for smoother playback (reduce to 500 frames max)
@@ -2016,5 +2159,13 @@ print(f"Animation will show {len(frames)} frames")
 anim = FuncAnimation(fig, update, frames=frames, init_func=init,
                      blit=False, interval=animation_interval, repeat=True)
 
+# Store animation reference for GUI controls
+if ENABLE_INTERACTIVE_GUI:
+    anim_state.anim = anim
+    anim_state.frame_list = list(frames)
+
 print("Showing animation...")
+print("\nControls:")
+print("  - Use control panel on the right for playback control")
+print("  - Drag mouse on 3D plot to rotate view")
 plt.show()
