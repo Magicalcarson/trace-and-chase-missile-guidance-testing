@@ -254,6 +254,25 @@ kill_dist=2
 climb_rate_curve= -0.001
 
 # ============================================================================
+# RANDOMIZATION SETTINGS
+# ============================================================================
+# Randomize aircraft starting position
+RANDOMIZE_AIRCRAFT_START = True
+AIRCRAFT_X_RANGE = (-2000, 2000)  # Random X offset range
+AIRCRAFT_Y_RANGE = (-2000, 2000)  # Random Y offset range
+AIRCRAFT_Z_RANGE = (8000, 15000)  # Random altitude range
+
+# Apply randomization to aircraft start position
+if RANDOMIZE_AIRCRAFT_START:
+    rng_start = np.random.default_rng()
+    aircraft_start_loc = np.array([
+        rng_start.uniform(AIRCRAFT_X_RANGE[0], AIRCRAFT_X_RANGE[1]),
+        rng_start.uniform(AIRCRAFT_Y_RANGE[0], AIRCRAFT_Y_RANGE[1]),
+        rng_start.uniform(AIRCRAFT_Z_RANGE[0], AIRCRAFT_Z_RANGE[1])
+    ])
+    print(f"Randomized aircraft start position: ({aircraft_start_loc[0]:.1f}, {aircraft_start_loc[1]:.1f}, {aircraft_start_loc[2]:.1f})")
+
+# ============================================================================
 # Global variables for segment start positions
 # ============================================================================
 curve_start_x = None
@@ -1927,6 +1946,11 @@ physics_text = ax.text2D(0.02, 0.70, f'Physics: {"ON" if ENABLE_PHYSICS else "OF
 evasion_text = ax.text2D(0.02, 0.65, f'Evasion: {EVASION_PATTERN if ENABLE_EVASION else "OFF"}', transform=ax.transAxes, fontsize=10, color='orange' if ENABLE_EVASION else 'gray')
 cm_text = ax.text2D(0.02, 0.60, '', transform=ax.transAxes, fontsize=10, color='cyan') if ENABLE_COUNTERMEASURES else None
 
+# Intercept notification text (large, centered)
+intercept_text = ax.text2D(0.5, 0.5, '', transform=ax.transAxes, fontsize=36,
+                           color='red', fontweight='bold', ha='center', va='center',
+                           bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.8))
+
 # Starting position markers
 ax.scatter(target_states[0, 0], target_states[0, 1], target_states[0, 2],
            c='green', s=100, marker='s', label='Aircraft Start')
@@ -2036,10 +2060,11 @@ def init():
     speed_text.set_text('')
     missile_speed_text.set_text('')
     distance_text.set_text('')
+    intercept_text.set_text('')
     if cm_text is not None:
         cm_text.set_text('')
 
-    artists = [target_point, target_trail] + missile_points + missile_trails + [time_text, speed_text, missile_speed_text, distance_text]
+    artists = [target_point, target_trail] + missile_points + missile_trails + [time_text, speed_text, missile_speed_text, distance_text, intercept_text]
     artists += distance_lines + altitude_lines
     if cm_text is not None:
         artists.append(cm_text)
@@ -2128,7 +2153,20 @@ def update(frame):
         cm_status = cm_system.get_status()
         cm_text.set_text(f'CM: F={cm_status["flares"]} C={cm_status["chaff"]} D={cm_status["decoyed"]}')
 
-    artists = [target_point, target_trail] + missile_points + missile_trails + [time_text, speed_text, missile_speed_text, distance_text]
+    # Check for intercept and show notification
+    intercept_msg = ''
+    for m in range(num_missiles):
+        if intercept_indices[m] is not None:
+            # Check if we just passed the intercept point
+            if frame >= intercept_indices[m] and frame < intercept_indices[m] + 200:
+                if ENABLE_MULTI_MISSILE:
+                    intercept_msg = f'💥 INTERCEPT! 💥\nMissile {m+1} hit at t={intercept_times[m]:.2f}s'
+                else:
+                    intercept_msg = f'💥 INTERCEPT! 💥\nt={intercept_times[m]:.2f}s'
+                break
+    intercept_text.set_text(intercept_msg)
+
+    artists = [target_point, target_trail] + missile_points + missile_trails + [time_text, speed_text, missile_speed_text, distance_text, intercept_text]
     artists += distance_lines + altitude_lines
     if cm_text is not None:
         artists.append(cm_text)
