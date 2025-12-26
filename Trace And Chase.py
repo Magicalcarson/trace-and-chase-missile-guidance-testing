@@ -2062,8 +2062,10 @@ def on_next_simulation(event):
     import os
     # Close current figure and restart
     plt.close('all')
-    # Restart the script
-    os.execv(sys.executable, [sys.executable] + sys.argv)
+    # Restart the script - use subprocess for Windows path compatibility
+    script_path = os.path.abspath(__file__)
+    subprocess.Popen([sys.executable, script_path], shell=False)
+    sys.exit(0)
 
 btn_next_sim.on_clicked(on_next_simulation)
 
