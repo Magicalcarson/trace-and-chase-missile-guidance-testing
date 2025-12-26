@@ -150,7 +150,7 @@ ENABLE_COUNTERMEASURES = True
 # Flare settings (PRIMARY defense against heat-seekers)
 ENABLE_FLARES = True
 FLARE_COUNT = 2  # Aircraft has only 2 flares!
-FLARE_DEPLOY_DISTANCE = 4000.0  # Deploy when missile is this close (m)
+FLARE_DEPLOY_DISTANCE = 1500.0  # Deploy when missile is VERY close (m) - risky but realistic
 FLARE_DEPLOY_INTERVAL = 3.0  # Minimum time between flare deployments (s)
 FLARE_EFFECTIVENESS = 0.7  # 70% chance of successfully decoying heat-seeker
 FLARE_DURATION = 5.0  # How long flare remains effective (s)
@@ -956,6 +956,7 @@ class CountermeasuresSystem:
 
         # Missile states affected by countermeasures
         self.decoyed_missiles = set()  # Missiles that are chasing decoys
+        self.decoyed_times = {}  # Missile index -> simulation time when decoyed
         self.jammed_missiles = set()   # Missiles affected by ECM
 
         # Random generator for countermeasure effects
@@ -1035,7 +1036,8 @@ class CountermeasuresSystem:
                 if self.rng.random() < FLARE_EFFECTIVENESS * susceptibility:
                     # Flare successfully decoys the missile
                     self.decoyed_missiles.add(idx)
-                    print(f"t={t:.2f}s: Flare deployed - Missile {idx+1} decoyed!")
+                    self.decoyed_times[idx] = t  # Record time when decoyed
+                    print(f"t={t:.2f}s: Flare deployed - Missile {idx+1} DECOYED! (Hit flare instead)")
 
                 # Deploy flare regardless of success
                 flare_vel = aircraft_vel.copy() * 0.3  # Flare starts with some aircraft velocity
@@ -1770,9 +1772,9 @@ for i in range(1, n_points):
             missile_launch_indices[m] = i
             missile_name = MISSILE_CONFIGS[m].get("name", f"Missile {m+1}") if ENABLE_MULTI_MISSILE else "Missile"
             if ENABLE_MULTI_MISSILE:
-                print(f"🚀 {missile_name} LAUNCHED from Launcher {m+1}!")
+                print(f"[LAUNCH] {missile_name} LAUNCHED from Launcher {m+1}!")
             else:
-                print(f"🚀 Missile launched!")
+                print(f"[LAUNCH] Missile launched!")
 
         if missile_launched[m]:
             # Missile holds position after intercept or death
@@ -1937,7 +1939,7 @@ ax.set_box_aspect([1, 1, 1])
 ax.set_xlabel('X (m)')
 ax.set_ylabel('Y (m)')
 ax.set_zlabel('Z (m)')
-ax.set_title(f'🔥 HEAT-SEEKER INTERCEPT SIMULATION 🔥\n{num_missiles} SAM Launchers | Aircraft has {FLARE_COUNT} Flares')
+ax.set_title(f'[HEAT-SEEKER INTERCEPT SIMULATION]\n{num_missiles} SAM Launchers | Aircraft has {FLARE_COUNT} Flares')
 ax.grid(True)
 ax.view_init(elev=25, azim=45)
 
@@ -1985,6 +1987,11 @@ intercept_text = ax.text2D(0.5, 0.5, '', transform=ax.transAxes, fontsize=36,
 restart_text = ax.text2D(0.5, 0.35, '', transform=ax.transAxes, fontsize=18,
                          color='white', ha='center', va='center',
                          bbox=dict(boxstyle='round', facecolor='blue', alpha=0.7))
+
+# Decoyed notification text (shows when missile hits flare)
+decoyed_text = ax.text2D(0.5, 0.65, '', transform=ax.transAxes, fontsize=24,
+                         color='orange', fontweight='bold', ha='center', va='center',
+                         bbox=dict(boxstyle='round', facecolor='black', alpha=0.7))
 
 # Starting position markers
 ax.scatter(target_states[0, 0], target_states[0, 1], target_states[0, 2],
@@ -2099,10 +2106,11 @@ def init():
     launcher_text.set_text('')
     intercept_text.set_text('')
     restart_text.set_text('')
+    decoyed_text.set_text('')
 
     artists = [target_point, target_trail] + missile_points + missile_trails
     artists += [status_text, missile_status_text, distance_text, flare_text, launcher_text]
-    artists += [intercept_text, restart_text]
+    artists += [intercept_text, restart_text, decoyed_text]
     artists += distance_lines + altitude_lines
     return tuple(artists)
 
@@ -2175,13 +2183,18 @@ def update(frame):
     missiles_decoyed_count = len([m for m in range(num_missiles) if m in decoyed_missiles])
 
     # Status text
+    all_missiles_done = all(
+        missile_dead[m] or m in decoyed_missiles or intercepted[m]
+        for m in range(num_missiles) if missile_launched[m]
+    ) and all(missile_launched)
+
     if active_missile >= 0:
         missile_name = MISSILE_CONFIGS[active_missile].get("name", f"SAM-{active_missile+1}")
-        status_text.set_text(f'🎯 {missile_name} TRACKING')
+        status_text.set_text(f'[*] {missile_name} TRACKING')
     elif any(intercepted):
-        status_text.set_text('✓ TARGET DESTROYED')
-    else:
-        status_text.set_text('⚠ ALL MISSILES EXPENDED')
+        status_text.set_text('[OK] TARGET DESTROYED')
+    elif all_missiles_done:
+        status_text.set_text('[X] AIRCRAFT ESCAPED!')
 
     # Missile status
     active_str = f"Active: {active_missile+1}" if active_missile >= 0 else "None"
@@ -2193,7 +2206,7 @@ def update(frame):
     # Flare status
     if cm_system is not None:
         flares_left = cm_system.flares_remaining
-        flare_text.set_text(f'🔥 FLARES: {flares_left}/{FLARE_COUNT}')
+        flare_text.set_text(f'FLARES: {flares_left}/{FLARE_COUNT}')
     else:
         flare_text.set_text('')
 
@@ -2210,6 +2223,7 @@ def update(frame):
 
     # Calculate restart frame window (RESTART_DELAY seconds after intercept)
     # Using simulation time (frame * dt) for accurate countdown
+    intercept_found = False
     for m in range(num_missiles):
         if intercept_indices[m] is not None:
             intercept_time_sec = intercept_indices[m] * dt
@@ -2219,17 +2233,38 @@ def update(frame):
             # Show intercept message for RESTART_DELAY seconds
             if frame >= intercept_indices[m] and time_since_intercept < RESTART_DELAY:
                 missile_name = MISSILE_CONFIGS[m].get("name", f"SAM-{m+1}")
-                intercept_msg = f'💥 INTERCEPT SUCCESS! 💥\n{missile_name}'
+                intercept_msg = f'*** INTERCEPT SUCCESS! ***\n{missile_name} HIT TARGET'
                 if AUTO_RESTART:
                     countdown = max(0, RESTART_DELAY - time_since_intercept)
                     restart_msg = f'Restarting in {countdown:.1f}s...'
+                intercept_found = True
                 break
+
+    # Check if aircraft escaped (all missiles done, no intercept)
+    if not intercept_found and all_missiles_done and not any(intercepted):
+        intercept_msg = '*** MISSION FAILED ***\nAIRCRAFT ESCAPED!'
+
     intercept_text.set_text(intercept_msg)
     restart_text.set_text(restart_msg)
 
+    # Check for decoyed missiles and show notification
+    decoyed_msg = ''
+    if cm_system is not None:
+        current_time_sec = frame * dt
+        for m in range(num_missiles):
+            if m in cm_system.decoyed_times:
+                decoyed_time = cm_system.decoyed_times[m]
+                time_since_decoyed = current_time_sec - decoyed_time
+                # Show message for 3 seconds after decoy
+                if 0 <= time_since_decoyed < 3.0:
+                    missile_name = MISSILE_CONFIGS[m].get("name", f"SAM-{m+1}")
+                    decoyed_msg = f'[DECOYED] {missile_name}\nHIT FLARE - EXPLODED!'
+                    break
+    decoyed_text.set_text(decoyed_msg)
+
     artists = [target_point, target_trail] + missile_points + missile_trails
     artists += [status_text, missile_status_text, distance_text, flare_text, launcher_text]
-    artists += [intercept_text, restart_text]
+    artists += [intercept_text, restart_text, decoyed_text]
     artists += distance_lines + altitude_lines
     return tuple(artists)
 
