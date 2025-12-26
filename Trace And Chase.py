@@ -1958,9 +1958,9 @@ ax.set_title(f'[HEAT-SEEKER INTERCEPT SIMULATION]\n{num_missiles} SAM Launchers 
 ax.grid(True)
 ax.view_init(elev=25, azim=45)
 
-# Create animation artists - Jet as STAR marker
-target_point, = ax.plot([], [], [], marker='*', color='cyan', markersize=15, label='JET', linestyle='None')
-target_trail, = ax.plot([], [], [], 'c-', linewidth=2, alpha=0.5, label='Jet Trail')
+# Create animation artists - Jet as CIRCLE marker (changes to STAR when destroyed)
+target_point, = ax.plot([], [], [], marker='o', color='blue', markersize=12, label='JET', linestyle='None')
+target_trail, = ax.plot([], [], [], 'b-', linewidth=2, alpha=0.5, label='Jet Trail')
 
 # Create artists for each missile
 missile_points = []
@@ -2047,7 +2047,31 @@ pause_text = ax.text2D(0.5, 0.35, '', transform=ax.transAxes, fontsize=16,
                        bbox=dict(boxstyle='round', facecolor='darkblue', alpha=0.8))
 
 # Global pause state for when Jet is destroyed
-pause_state = {'paused': False, 'pause_start_frame': 0, 'pause_duration': RESTART_DELAY}
+pause_state = {
+    'paused': False,
+    'pause_start_frame': 0,
+    'frozen_frame': None,  # Frame to freeze at when jet destroyed
+    'anim_ref': None  # Reference to animation object
+}
+
+# Add "Next Simulation" button at bottom of status panel
+from matplotlib.widgets import Button
+ax_next_btn = plt.axes([0.02, 0.02, 0.18, 0.04])  # Position at bottom left
+btn_next_sim = Button(ax_next_btn, 'NEXT SIMULATION', color='#1a5f1a', hovercolor='#2d8f2d')
+btn_next_sim.label.set_color('white')
+btn_next_sim.label.set_fontweight('bold')
+
+def on_next_simulation(event):
+    """Restart the simulation by re-running the script."""
+    import subprocess
+    import sys
+    import os
+    # Close current figure and restart
+    plt.close('all')
+    # Restart the script
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+btn_next_sim.on_clicked(on_next_simulation)
 
 # Starting position markers
 ax.scatter(target_states[0, 0], target_states[0, 1], target_states[0, 2],
@@ -2171,79 +2195,78 @@ def init():
 def update(frame):
     """Update animation for given frame."""
 
-    # ========== CHECK FOR PAUSE STATE (Jet destroyed) ==========
+    # ========== CHECK FOR FREEZE STATE (Jet destroyed) ==========
     jet_destroyed = any(intercepted)
-    current_time_sec = frame * dt
 
-    if jet_destroyed and not pause_state['paused']:
-        # Start pause
+    # If jet is destroyed and we haven't frozen yet, freeze now
+    if jet_destroyed and pause_state['frozen_frame'] is None:
+        pause_state['frozen_frame'] = frame
         pause_state['paused'] = True
-        pause_state['pause_start_frame'] = frame
+        # Stop the animation
+        if pause_state['anim_ref'] is not None:
+            pause_state['anim_ref'].event_source.stop()
 
-    # Calculate pause countdown
-    pause_countdown = 0
-    if pause_state['paused']:
-        frames_since_pause = frame - pause_state['pause_start_frame']
-        time_paused = frames_since_pause * dt
-        pause_countdown = max(0, pause_state['pause_duration'] - time_paused)
+    # Use frozen frame if jet is destroyed
+    display_frame = pause_state['frozen_frame'] if pause_state['frozen_frame'] is not None else frame
+    current_time_sec = display_frame * dt
 
     # ========== UPDATE 3D POSITIONS ==========
     # Update aircraft position
-    target_point.set_data([target_states[frame, 0]], [target_states[frame, 1]])
-    target_point.set_3d_properties([target_states[frame, 2]])
+    target_point.set_data([target_states[display_frame, 0]], [target_states[display_frame, 1]])
+    target_point.set_3d_properties([target_states[display_frame, 2]])
 
-    # Change Jet marker if destroyed
+    # Change Jet marker: CIRCLE (normal) -> STAR (destroyed)
     if jet_destroyed:
-        target_point.set_marker('x')
+        target_point.set_marker('*')  # Star when destroyed
         target_point.set_color('red')
         target_point.set_markersize(20)
     else:
-        target_point.set_marker('*')
-        target_point.set_color('cyan')
-        target_point.set_markersize(15)
+        target_point.set_marker('o')  # Circle when normal
+        target_point.set_color('blue')
+        target_point.set_markersize(12)
 
     # Update aircraft trail (with fade effect / max length)
     if TRAIL_FADE_EFFECT:
-        trail_start = max(0, frame - TRAIL_MAX_LENGTH)
+        trail_start = max(0, display_frame - TRAIL_MAX_LENGTH)
     else:
         trail_start = 0
-    target_trail.set_data(target_states[trail_start:frame+1, 0], target_states[trail_start:frame+1, 1])
-    target_trail.set_3d_properties(target_states[trail_start:frame+1, 2])
+    target_trail.set_data(target_states[trail_start:display_frame+1, 0], target_states[trail_start:display_frame+1, 1])
+    target_trail.set_3d_properties(target_states[trail_start:display_frame+1, 2])
 
     # Calculate distances for each missile
     missile_distances = []
     for m in range(num_missiles):
         # Update missile position
-        missile_points[m].set_data([all_missile_states[m, frame, 0]], [all_missile_states[m, frame, 1]])
-        missile_points[m].set_3d_properties([all_missile_states[m, frame, 2]])
+        missile_points[m].set_data([all_missile_states[m, display_frame, 0]], [all_missile_states[m, display_frame, 1]])
+        missile_points[m].set_3d_properties([all_missile_states[m, display_frame, 2]])
 
         # Update missile trail
         if TRAIL_FADE_EFFECT:
-            trail_start = max(0, frame - TRAIL_MAX_LENGTH)
+            trail_start = max(0, display_frame - TRAIL_MAX_LENGTH)
         else:
             trail_start = 0
-        missile_trails[m].set_data(all_missile_states[m, trail_start:frame+1, 0], all_missile_states[m, trail_start:frame+1, 1])
-        missile_trails[m].set_3d_properties(all_missile_states[m, trail_start:frame+1, 2])
+        missile_trails[m].set_data(all_missile_states[m, trail_start:display_frame+1, 0], all_missile_states[m, trail_start:display_frame+1, 1])
+        missile_trails[m].set_3d_properties(all_missile_states[m, trail_start:display_frame+1, 2])
 
         # Calculate distance
-        dist = np.linalg.norm(target_states[frame] - all_missile_states[m, frame])
+        dist = np.linalg.norm(target_states[display_frame] - all_missile_states[m, display_frame])
         missile_distances.append(dist)
 
         # Update distance lines
         if SHOW_DISTANCE_LINES and m < len(distance_lines):
-            m_pos = all_missile_states[m, frame]
-            t_pos = target_states[frame]
+            m_pos = all_missile_states[m, display_frame]
+            t_pos = target_states[display_frame]
             distance_lines[m].set_data([m_pos[0], t_pos[0]], [m_pos[1], t_pos[1]])
             distance_lines[m].set_3d_properties([m_pos[2], t_pos[2]])
 
     # Update altitude lines
     if SHOW_ALTITUDE_LINES and len(altitude_lines) > 0:
-        t_pos = target_states[frame]
+        t_pos = target_states[display_frame]
         altitude_lines[0].set_data([t_pos[0], t_pos[0]], [t_pos[1], t_pos[1]])
         altitude_lines[0].set_3d_properties([0, t_pos[2]])
         for m in range(num_missiles):
             if m + 1 < len(altitude_lines):
-                m_pos = all_missile_states[m, frame]
+                m_pos = all_missile_states[m, display_frame]
                 altitude_lines[m + 1].set_data([m_pos[0], m_pos[0]], [m_pos[1], m_pos[1]])
                 altitude_lines[m + 1].set_3d_properties([0, m_pos[2]])
 
@@ -2315,7 +2338,7 @@ def update(frame):
     if jet_destroyed:
         status_texts['mission_status'].set_text('TARGET DESTROYED!')
         status_texts['mission_status'].set_color('#00ff00')
-        status_texts['mission_detail'].set_text(f'Pausing: {pause_countdown:.1f}s')
+        status_texts['mission_detail'].set_text('Click NEXT SIMULATION')
     elif all_missiles_done:
         status_texts['mission_status'].set_text('MISSION FAILED')
         status_texts['mission_status'].set_color('red')
@@ -2339,9 +2362,9 @@ def update(frame):
                 break
     intercept_text.set_text(intercept_msg)
 
-    # Pause countdown display
-    if pause_state['paused'] and pause_countdown > 0:
-        pause_text.set_text(f'SIMULATION PAUSED\nResuming in {pause_countdown:.1f}s')
+    # Freeze display when jet destroyed
+    if jet_destroyed:
+        pause_text.set_text('SIMULATION FROZEN\nPress NEXT SIMULATION')
     else:
         pause_text.set_text('')
 
@@ -2504,7 +2527,10 @@ frames = range(0, len(times), frame_skip)
 print(f"Animation will show {len(frames)} frames")
 
 anim = FuncAnimation(fig, update, frames=frames, init_func=init,
-                     blit=False, interval=animation_interval, repeat=True)
+                     blit=False, interval=animation_interval, repeat=False)  # No repeat - freeze on destroy
+
+# Store animation reference for freeze control
+pause_state['anim_ref'] = anim
 
 # Store animation reference for GUI controls
 if ENABLE_INTERACTIVE_GUI:
@@ -2513,6 +2539,7 @@ if ENABLE_INTERACTIVE_GUI:
 
 print("Showing animation...")
 print("\nControls:")
-print("  - Use control panel on the right for playback control")
+print("  - Simulation freezes when Jet is destroyed")
+print("  - Click NEXT SIMULATION button to run again")
 print("  - Drag mouse on 3D plot to rotate view")
 plt.show()
