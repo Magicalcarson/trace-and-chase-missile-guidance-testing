@@ -212,6 +212,29 @@ GUI_SHOW_BUTTONS = True  # Show play/pause/reset buttons
 GUI_SHOW_DROPDOWNS = True  # Show algorithm/evasion selectors
 
 # ============================================================================
+# VISUALIZATION SETTINGS
+# ============================================================================
+# Enhanced visualization options
+SHOW_VELOCITY_VECTORS = True  # Show direction arrows on aircraft and missiles
+VELOCITY_VECTOR_SCALE = 0.1  # Scale factor for velocity vectors
+
+SHOW_DISTANCE_LINES = True  # Show lines between missiles and target
+DISTANCE_LINE_COLOR = 'gray'
+DISTANCE_LINE_ALPHA = 0.3
+
+SHOW_GROUND_PLANE = True  # Show ground reference plane
+GROUND_PLANE_ALPHA = 0.1
+GROUND_PLANE_COLOR = 'green'
+
+SHOW_ALTITUDE_LINES = True  # Show vertical lines to ground
+ALTITUDE_LINE_ALPHA = 0.2
+
+TRAIL_FADE_EFFECT = True  # Trails fade over time
+TRAIL_MAX_LENGTH = 500  # Maximum trail length in frames
+
+SHOW_INTERCEPT_PREDICTION = True  # Show predicted intercept point
+
+# ============================================================================
 # Variables
 # ============================================================================
 Straight_time = 25      # Duration of first straight segment (s)
@@ -1930,6 +1953,58 @@ for m in range(num_missiles):
 ax.legend(loc='upper right')
 
 # ============================================================================
+# ENHANCED VISUALIZATION ELEMENTS
+# ============================================================================
+
+# Add ground plane
+if SHOW_GROUND_PLANE:
+    # Create a ground plane at z=0
+    ground_x = np.linspace(x_center - plot_radius, x_center + plot_radius, 10)
+    ground_y = np.linspace(y_center - plot_radius, y_center + plot_radius, 10)
+    ground_X, ground_Y = np.meshgrid(ground_x, ground_y)
+    ground_Z = np.zeros_like(ground_X)
+    ax.plot_surface(ground_X, ground_Y, ground_Z, alpha=GROUND_PLANE_ALPHA,
+                    color=GROUND_PLANE_COLOR, shade=False)
+    # Add grid lines on ground
+    for gx in ground_x[::2]:
+        ax.plot([gx, gx], [ground_y[0], ground_y[-1]], [0, 0],
+                color='darkgreen', alpha=0.2, linewidth=0.5)
+    for gy in ground_y[::2]:
+        ax.plot([ground_x[0], ground_x[-1]], [gy, gy], [0, 0],
+                color='darkgreen', alpha=0.2, linewidth=0.5)
+
+# Create distance line artists (one per missile)
+distance_lines = []
+if SHOW_DISTANCE_LINES:
+    for m in range(num_missiles):
+        line, = ax.plot([], [], [], color=DISTANCE_LINE_COLOR,
+                        alpha=DISTANCE_LINE_ALPHA, linestyle='--', linewidth=1)
+        distance_lines.append(line)
+
+# Create altitude line artists
+altitude_lines = []
+if SHOW_ALTITUDE_LINES:
+    # One for target
+    target_alt_line, = ax.plot([], [], [], color='blue', alpha=ALTITUDE_LINE_ALPHA,
+                               linestyle=':', linewidth=1)
+    altitude_lines.append(target_alt_line)
+    # One for each missile
+    for m in range(num_missiles):
+        if ENABLE_MULTI_MISSILE:
+            color = MISSILE_CONFIGS[m].get("color", missile_colors[m % len(missile_colors)])
+        else:
+            color = 'red'
+        alt_line, = ax.plot([], [], [], color=color, alpha=ALTITUDE_LINE_ALPHA,
+                            linestyle=':', linewidth=1)
+        altitude_lines.append(alt_line)
+
+# Create velocity vector artists using quiver
+velocity_artists = []
+if SHOW_VELOCITY_VECTORS:
+    # Note: We'll update these in the animation loop
+    pass  # Quiver objects will be created dynamically
+
+# ============================================================================
 # ANIMATION FUNCTIONS
 # ============================================================================
 def init():
@@ -1945,6 +2020,18 @@ def init():
         missile_trails[m].set_data([], [])
         missile_trails[m].set_3d_properties([])
 
+    # Initialize distance lines
+    if SHOW_DISTANCE_LINES:
+        for line in distance_lines:
+            line.set_data([], [])
+            line.set_3d_properties([])
+
+    # Initialize altitude lines
+    if SHOW_ALTITUDE_LINES:
+        for line in altitude_lines:
+            line.set_data([], [])
+            line.set_3d_properties([])
+
     time_text.set_text('')
     speed_text.set_text('')
     missile_speed_text.set_text('')
@@ -1953,6 +2040,7 @@ def init():
         cm_text.set_text('')
 
     artists = [target_point, target_trail] + missile_points + missile_trails + [time_text, speed_text, missile_speed_text, distance_text]
+    artists += distance_lines + altitude_lines
     if cm_text is not None:
         artists.append(cm_text)
     return tuple(artists)
@@ -1964,9 +2052,13 @@ def update(frame):
     target_point.set_data([target_states[frame, 0]], [target_states[frame, 1]])
     target_point.set_3d_properties([target_states[frame, 2]])
 
-    # Update aircraft trail
-    target_trail.set_data(target_states[:frame+1, 0], target_states[:frame+1, 1])
-    target_trail.set_3d_properties(target_states[:frame+1, 2])
+    # Update aircraft trail (with fade effect / max length)
+    if TRAIL_FADE_EFFECT:
+        trail_start = max(0, frame - TRAIL_MAX_LENGTH)
+    else:
+        trail_start = 0
+    target_trail.set_data(target_states[trail_start:frame+1, 0], target_states[trail_start:frame+1, 1])
+    target_trail.set_3d_properties(target_states[trail_start:frame+1, 2])
 
     # Update all missiles
     min_distance = float('inf')
@@ -1975,14 +2067,39 @@ def update(frame):
         missile_points[m].set_data([all_missile_states[m, frame, 0]], [all_missile_states[m, frame, 1]])
         missile_points[m].set_3d_properties([all_missile_states[m, frame, 2]])
 
-        # Update missile trail
-        missile_trails[m].set_data(all_missile_states[m, :frame+1, 0], all_missile_states[m, :frame+1, 1])
-        missile_trails[m].set_3d_properties(all_missile_states[m, :frame+1, 2])
+        # Update missile trail (with fade effect / max length)
+        if TRAIL_FADE_EFFECT:
+            trail_start = max(0, frame - TRAIL_MAX_LENGTH)
+        else:
+            trail_start = 0
+        missile_trails[m].set_data(all_missile_states[m, trail_start:frame+1, 0], all_missile_states[m, trail_start:frame+1, 1])
+        missile_trails[m].set_3d_properties(all_missile_states[m, trail_start:frame+1, 2])
 
         # Track closest missile distance
         dist = np.linalg.norm(target_states[frame] - all_missile_states[m, frame])
         if dist < min_distance:
             min_distance = dist
+
+        # Update distance lines (missile to target)
+        if SHOW_DISTANCE_LINES and m < len(distance_lines):
+            m_pos = all_missile_states[m, frame]
+            t_pos = target_states[frame]
+            distance_lines[m].set_data([m_pos[0], t_pos[0]], [m_pos[1], t_pos[1]])
+            distance_lines[m].set_3d_properties([m_pos[2], t_pos[2]])
+
+    # Update altitude lines (vertical lines to ground)
+    if SHOW_ALTITUDE_LINES and len(altitude_lines) > 0:
+        # Target altitude line
+        t_pos = target_states[frame]
+        altitude_lines[0].set_data([t_pos[0], t_pos[0]], [t_pos[1], t_pos[1]])
+        altitude_lines[0].set_3d_properties([0, t_pos[2]])
+
+        # Missile altitude lines
+        for m in range(num_missiles):
+            if m + 1 < len(altitude_lines):
+                m_pos = all_missile_states[m, frame]
+                altitude_lines[m + 1].set_data([m_pos[0], m_pos[0]], [m_pos[1], m_pos[1]])
+                altitude_lines[m + 1].set_3d_properties([0, m_pos[2]])
 
     # Calculate current target speed (for display)
     if frame > 0:
@@ -2012,6 +2129,7 @@ def update(frame):
         cm_text.set_text(f'CM: F={cm_status["flares"]} C={cm_status["chaff"]} D={cm_status["decoyed"]}')
 
     artists = [target_point, target_trail] + missile_points + missile_trails + [time_text, speed_text, missile_speed_text, distance_text]
+    artists += distance_lines + altitude_lines
     if cm_text is not None:
         artists.append(cm_text)
     return tuple(artists)
