@@ -957,12 +957,13 @@ class CountermeasuresSystem:
         # Missile states affected by countermeasures
         self.decoyed_missiles = set()  # Missiles that are chasing decoys
         self.decoyed_times = {}  # Missile index -> simulation time when decoyed
+        self.decoyed_indices = {}  # Missile index -> frame index when decoyed
         self.jammed_missiles = set()   # Missiles affected by ECM
 
         # Random generator for countermeasure effects
         self.rng = np.random.default_rng(42)
 
-    def update(self, t, aircraft_pos, aircraft_vel, missile_positions, missile_indices, guidance_types, dt):
+    def update(self, t, aircraft_pos, aircraft_vel, missile_positions, missile_indices, guidance_types, dt, frame_idx=0):
         """
         Update countermeasures state and check for deployment.
 
@@ -977,7 +978,7 @@ class CountermeasuresSystem:
         self._update_active_chaff(t)
 
         # Check if we should deploy countermeasures
-        self._check_and_deploy(t, aircraft_pos, aircraft_vel, missile_positions, missile_indices, guidance_types)
+        self._check_and_deploy(t, aircraft_pos, aircraft_vel, missile_positions, missile_indices, guidance_types, frame_idx)
 
         # Calculate ECM effects
         ecm_noise = {}
@@ -1017,7 +1018,7 @@ class CountermeasuresSystem:
         self.active_chaff = [(pos, deploy_time) for pos, deploy_time in self.active_chaff
                              if t - deploy_time < CHAFF_DURATION]
 
-    def _check_and_deploy(self, t, aircraft_pos, aircraft_vel, missile_positions, missile_indices, guidance_types):
+    def _check_and_deploy(self, t, aircraft_pos, aircraft_vel, missile_positions, missile_indices, guidance_types, frame_idx=0):
         """Check if countermeasures should be deployed and deploy them."""
         for idx, m_pos in zip(missile_indices, missile_positions):
             if idx in self.decoyed_missiles:
@@ -1034,10 +1035,11 @@ class CountermeasuresSystem:
 
                 susceptibility = CM_SUSCEPTIBILITY.get(guidance_type, {}).get("flare", 0.5)
                 if self.rng.random() < FLARE_EFFECTIVENESS * susceptibility:
-                    # Flare successfully decoys the missile
+                    # Flare successfully decoys the missile - it explodes on flare
                     self.decoyed_missiles.add(idx)
                     self.decoyed_times[idx] = t  # Record time when decoyed
-                    print(f"t={t:.2f}s: Flare deployed - Missile {idx+1} DECOYED! (Hit flare instead)")
+                    self.decoyed_indices[idx] = frame_idx  # Record frame index when decoyed
+                    print(f"t={t:.2f}s: Flare deployed - Missile {idx+1} EXPLODED on FLARE!")
 
                 # Deploy flare regardless of success
                 flare_vel = aircraft_vel.copy() * 0.3  # Flare starts with some aircraft velocity
@@ -1665,6 +1667,9 @@ cm_system = CountermeasuresSystem() if ENABLE_COUNTERMEASURES else None
 decoyed_missiles = set()
 ecm_noise = {}
 
+# Track flare count at each frame for animation display
+flare_counts_per_frame = np.full(n_points, FLARE_COUNT, dtype=int)
+
 # Build guidance types dictionary for countermeasures
 guidance_types = {}
 for m in range(num_missiles):
@@ -1739,8 +1744,10 @@ for i in range(1, n_points):
             decoyed_missiles, ecm_noise = cm_system.update(
                 t, target_states[i], target_velocities[i],
                 active_missile_positions, active_missile_indices,
-                guidance_types, dt
+                guidance_types, dt, frame_idx=i
             )
+        # Track flare count at this frame
+        flare_counts_per_frame[i] = cm_system.flares_remaining
 
     # ========== MISSILES UPDATE ==========
     for m in range(num_missiles):
@@ -1777,30 +1784,17 @@ for i in range(1, n_points):
                 print(f"[LAUNCH] Missile launched!")
 
         if missile_launched[m]:
-            # Missile holds position after intercept or death
-            if intercepted[m] or missile_dead[m]:
+            # Missile holds position after intercept, death, or decoyed (exploded on flare)
+            if intercepted[m] or missile_dead[m] or m in decoyed_missiles:
                 all_missile_states[m, i] = all_missile_states[m, i-1]
                 all_missile_velocities[m, i] = all_missile_velocities[m, i-1]
                 all_missile_speeds[m, i] = all_missile_speeds[m, i-1]
                 continue
 
-            # Get target info (check if decoyed by countermeasures)
-            if m in decoyed_missiles and cm_system is not None:
-                # Missile is chasing a decoy instead of the real target
-                decoy_pos = cm_system.get_decoy_position(m, t)
-                if decoy_pos is not None:
-                    target_pos = decoy_pos
-                    target_vel = np.zeros(3)  # Decoys don't move much
-                    target_accel = np.zeros(3)
-                else:
-                    # Decoy expired, missile lost
-                    target_pos = target_states[i]
-                    target_vel = target_velocities[i]
-                    target_accel = target_accelerations[i]
-            else:
-                target_pos = target_states[i]
-                target_vel = target_velocities[i]
-                target_accel = target_accelerations[i]
+            # Get target info
+            target_pos = target_states[i]
+            target_vel = target_velocities[i]
+            target_accel = target_accelerations[i]
 
             # Apply ECM noise to target position if affected
             if m in ecm_noise:
@@ -2279,14 +2273,15 @@ def update(frame):
         status_texts['jet_status'].set_text('Status: ACTIVE')
         status_texts['jet_status'].set_color('#00ff00')
 
-    # FLARE STATUS
-    if cm_system is not None:
-        flares_left = cm_system.flares_remaining
-        status_texts['jet_flare'].set_text(f'Flares: {flares_left}/{FLARE_COUNT}')
-        if flares_left == 0:
-            status_texts['jet_flare'].set_color('red')
-        else:
-            status_texts['jet_flare'].set_color('orange')
+    # FLARE STATUS - use the count at current display frame
+    flares_left = flare_counts_per_frame[display_frame]
+    status_texts['jet_flare'].set_text(f'Flares: {flares_left}/{FLARE_COUNT}')
+    if flares_left == 0:
+        status_texts['jet_flare'].set_color('red')
+    elif flares_left < FLARE_COUNT:
+        status_texts['jet_flare'].set_color('yellow')  # Some used
+    else:
+        status_texts['jet_flare'].set_color('orange')
 
     # SAM STATUS UPDATES
     sam_status_texts = [
@@ -2306,7 +2301,7 @@ def update(frame):
             status_t.set_text('Status: TARGET HIT!')
             status_t.set_color('#00ff00')
         elif m in decoyed_missiles:
-            status_t.set_text('Status: DECOYED')
+            status_t.set_text('Status: HIT FLARE!')
             status_t.set_color('orange')
         elif missile_dead[m]:
             status_t.set_text('Status: LOST')
