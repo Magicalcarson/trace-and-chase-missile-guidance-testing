@@ -134,7 +134,7 @@ TARGET_ASSIGNMENT = "single"
 # AUTO-RESTART SETTINGS
 # ============================================================================
 AUTO_RESTART = True  # Automatically restart simulation after intercept
-RESTART_DELAY = 5.0  # Seconds to wait before restart
+RESTART_DELAY = 10.0  # Seconds to wait before restart (pause when Jet destroyed)
 
 # ============================================================================
 # COUNTERMEASURES SETTINGS (Heat-Seeker Defense)
@@ -215,7 +215,7 @@ MC_RESULTS_FILE = "monte_carlo_results.csv"
 # INTERACTIVE GUI SETTINGS
 # ============================================================================
 # Enable interactive control panel
-ENABLE_INTERACTIVE_GUI = True
+ENABLE_INTERACTIVE_GUI = False  # Disabled - using custom status panel instead
 
 # GUI layout options
 GUI_PANEL_WIDTH = 0.25  # Width of control panel (0-1)
@@ -1908,10 +1908,25 @@ if ENABLE_COUNTERMEASURES and cm_system is not None:
     print(f"Missiles decoyed: {cm_status['decoyed']} / {num_missiles}")
 
 # ============================================================================
-# CREATE 3D PLOT
+# CREATE 3D PLOT WITH STATUS PANEL
 # ============================================================================
-fig = plt.figure(figsize=(14, 10))
-ax = fig.add_subplot(111, projection='3d')
+fig = plt.figure(figsize=(16, 10))
+
+# Create grid layout: left panel for status, right for 3D view
+gs = fig.add_gridspec(1, 2, width_ratios=[1, 3], wspace=0.05)
+
+# Left panel - Status display (2D)
+ax_status_panel = fig.add_subplot(gs[0])
+ax_status_panel.set_xlim(0, 1)
+ax_status_panel.set_ylim(0, 1)
+ax_status_panel.set_facecolor('#1a1a2e')
+ax_status_panel.set_xticks([])
+ax_status_panel.set_yticks([])
+ax_status_panel.set_title('TACTICAL STATUS', fontsize=14, fontweight='bold', color='white',
+                          pad=10, backgroundcolor='#16213e')
+
+# Right panel - 3D simulation
+ax = fig.add_subplot(gs[1], projection='3d')
 
 # Set axis limits based on all trajectories
 all_trajectory_points = [target_states]
@@ -1943,9 +1958,9 @@ ax.set_title(f'[HEAT-SEEKER INTERCEPT SIMULATION]\n{num_missiles} SAM Launchers 
 ax.grid(True)
 ax.view_init(elev=25, azim=45)
 
-# Create animation artists
-target_point, = ax.plot([], [], [], 'bo', markersize=10, label='Aircraft')
-target_trail, = ax.plot([], [], [], 'b-', linewidth=2, alpha=0.5, label='Aircraft Trail')
+# Create animation artists - Jet as STAR marker
+target_point, = ax.plot([], [], [], marker='*', color='cyan', markersize=15, label='JET', linestyle='None')
+target_trail, = ax.plot([], [], [], 'c-', linewidth=2, alpha=0.5, label='Jet Trail')
 
 # Create artists for each missile
 missile_points = []
@@ -1957,41 +1972,82 @@ for m in range(num_missiles):
         color = MISSILE_CONFIGS[m].get("color", missile_colors[m % len(missile_colors)])
     else:
         color = 'red'
-    point, = ax.plot([], [], [], 'o', color=color, markersize=8, label=f'Missile {m+1}' if ENABLE_MULTI_MISSILE else 'Missile')
+    point, = ax.plot([], [], [], 'o', color=color, markersize=8, label=f'SAM-{m+1}' if ENABLE_MULTI_MISSILE else 'Missile')
     trail, = ax.plot([], [], [], '-', color=color, linewidth=1.5, alpha=0.5)
     missile_points.append(point)
     missile_trails.append(trail)
 
-# HUD text - No time display, focus on tactical info
-status_text = ax.text2D(0.02, 0.95, '', transform=ax.transAxes, fontsize=12, fontweight='bold')
-missile_status_text = ax.text2D(0.02, 0.88, '', transform=ax.transAxes, fontsize=10, color='red')
-distance_text = ax.text2D(0.02, 0.81, '', transform=ax.transAxes, fontsize=10)
-flare_text = ax.text2D(0.02, 0.74, '', transform=ax.transAxes, fontsize=11, color='orange', fontweight='bold')
-launcher_text = ax.text2D(0.02, 0.67, '', transform=ax.transAxes, fontsize=9, color='purple')
+# ============================================================================
+# STATUS PANEL UI ELEMENTS (Left Panel)
+# ============================================================================
+# Draw status boxes on the left panel
 
-# Keep these for compatibility but hide time
-time_text = ax.text2D(0.02, 0.60, '', transform=ax.transAxes, fontsize=1, alpha=0)  # Hidden
-speed_text = ax.text2D(0.02, 0.55, '', transform=ax.transAxes, fontsize=1, alpha=0)  # Hidden
-missile_speed_text = ax.text2D(0.02, 0.50, '', transform=ax.transAxes, fontsize=1, alpha=0)  # Hidden
-algo_text = ax.text2D(0.02, 0.45, '', transform=ax.transAxes, fontsize=1, alpha=0)  # Hidden
-physics_text = ax.text2D(0.02, 0.40, '', transform=ax.transAxes, fontsize=1, alpha=0)  # Hidden
-evasion_text = ax.text2D(0.02, 0.35, '', transform=ax.transAxes, fontsize=1, alpha=0)  # Hidden
-cm_text = None  # Disabled
+# Title box
+ax_status_panel.add_patch(plt.Rectangle((0.05, 0.92), 0.9, 0.06, facecolor='#0f3460', edgecolor='white', linewidth=2))
+panel_title = ax_status_panel.text(0.5, 0.95, 'MISSION CONTROL', ha='center', va='center',
+                                    fontsize=12, fontweight='bold', color='#00ff00', family='monospace')
 
-# Intercept notification text (large, centered)
-intercept_text = ax.text2D(0.5, 0.5, '', transform=ax.transAxes, fontsize=36,
+# JET STATUS BOX
+ax_status_panel.add_patch(plt.Rectangle((0.05, 0.78), 0.9, 0.12, facecolor='#16213e', edgecolor='#00ffff', linewidth=2))
+ax_status_panel.text(0.1, 0.875, 'JET FIGHTER', fontsize=10, fontweight='bold', color='#00ffff', family='monospace')
+jet_status_text = ax_status_panel.text(0.1, 0.81, 'Status: ACTIVE', fontsize=9, color='#00ff00', family='monospace')
+jet_flare_text = ax_status_panel.text(0.55, 0.81, 'Flares: 2/2', fontsize=9, color='orange', family='monospace')
+
+# SAM-1 STATUS BOX
+ax_status_panel.add_patch(plt.Rectangle((0.05, 0.62), 0.9, 0.14, facecolor='#16213e', edgecolor='red', linewidth=2))
+ax_status_panel.text(0.1, 0.735, 'SAM-1 [EAST]', fontsize=10, fontweight='bold', color='red', family='monospace')
+sam1_status_text = ax_status_panel.text(0.1, 0.675, 'Status: READY', fontsize=9, color='yellow', family='monospace')
+sam1_dist_text = ax_status_panel.text(0.1, 0.635, 'Distance: ---', fontsize=8, color='white', family='monospace')
+
+# SAM-2 STATUS BOX
+ax_status_panel.add_patch(plt.Rectangle((0.05, 0.46), 0.9, 0.14, facecolor='#16213e', edgecolor='orange', linewidth=2))
+ax_status_panel.text(0.1, 0.575, 'SAM-2 [NORTH]', fontsize=10, fontweight='bold', color='orange', family='monospace')
+sam2_status_text = ax_status_panel.text(0.1, 0.515, 'Status: STANDBY', fontsize=9, color='gray', family='monospace')
+sam2_dist_text = ax_status_panel.text(0.1, 0.475, 'Distance: ---', fontsize=8, color='white', family='monospace')
+
+# SAM-3 STATUS BOX
+ax_status_panel.add_patch(plt.Rectangle((0.05, 0.30), 0.9, 0.14, facecolor='#16213e', edgecolor='magenta', linewidth=2))
+ax_status_panel.text(0.1, 0.415, 'SAM-3 [NORTHWEST]', fontsize=10, fontweight='bold', color='magenta', family='monospace')
+sam3_status_text = ax_status_panel.text(0.1, 0.355, 'Status: STANDBY', fontsize=9, color='gray', family='monospace')
+sam3_dist_text = ax_status_panel.text(0.1, 0.315, 'Distance: ---', fontsize=8, color='white', family='monospace')
+
+# MISSION RESULT BOX
+ax_status_panel.add_patch(plt.Rectangle((0.05, 0.08), 0.9, 0.18, facecolor='#0f3460', edgecolor='#ffff00', linewidth=2))
+ax_status_panel.text(0.1, 0.225, 'MISSION STATUS', fontsize=10, fontweight='bold', color='#ffff00', family='monospace')
+mission_status_text = ax_status_panel.text(0.1, 0.165, 'IN PROGRESS...', fontsize=11, color='white', family='monospace')
+mission_detail_text = ax_status_panel.text(0.1, 0.105, '', fontsize=9, color='#aaaaaa', family='monospace')
+
+# Store all status text elements for updating
+status_texts = {
+    'jet_status': jet_status_text,
+    'jet_flare': jet_flare_text,
+    'sam1_status': sam1_status_text,
+    'sam1_dist': sam1_dist_text,
+    'sam2_status': sam2_status_text,
+    'sam2_dist': sam2_dist_text,
+    'sam3_status': sam3_status_text,
+    'sam3_dist': sam3_dist_text,
+    'mission_status': mission_status_text,
+    'mission_detail': mission_detail_text,
+}
+
+# Intercept notification text (large, centered) - on 3D view
+intercept_text = ax.text2D(0.5, 0.5, '', transform=ax.transAxes, fontsize=28,
                            color='red', fontweight='bold', ha='center', va='center',
-                           bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.8))
-
-# Restart countdown text
-restart_text = ax.text2D(0.5, 0.35, '', transform=ax.transAxes, fontsize=18,
-                         color='white', ha='center', va='center',
-                         bbox=dict(boxstyle='round', facecolor='blue', alpha=0.7))
+                           bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.9))
 
 # Decoyed notification text (shows when missile hits flare)
-decoyed_text = ax.text2D(0.5, 0.65, '', transform=ax.transAxes, fontsize=24,
+decoyed_text = ax.text2D(0.5, 0.7, '', transform=ax.transAxes, fontsize=20,
                          color='orange', fontweight='bold', ha='center', va='center',
-                         bbox=dict(boxstyle='round', facecolor='black', alpha=0.7))
+                         bbox=dict(boxstyle='round', facecolor='black', alpha=0.8))
+
+# Pause/countdown text
+pause_text = ax.text2D(0.5, 0.35, '', transform=ax.transAxes, fontsize=16,
+                       color='white', ha='center', va='center',
+                       bbox=dict(boxstyle='round', facecolor='darkblue', alpha=0.8))
+
+# Global pause state for when Jet is destroyed
+pause_state = {'paused': False, 'pause_start_frame': 0, 'pause_duration': RESTART_DELAY}
 
 # Starting position markers
 ax.scatter(target_states[0, 0], target_states[0, 1], target_states[0, 2],
@@ -2098,28 +2154,53 @@ def init():
             line.set_data([], [])
             line.set_3d_properties([])
 
-    # Initialize HUD text
-    status_text.set_text('')
-    missile_status_text.set_text('')
-    distance_text.set_text('')
-    flare_text.set_text('')
-    launcher_text.set_text('')
+    # Initialize notification texts
     intercept_text.set_text('')
-    restart_text.set_text('')
     decoyed_text.set_text('')
+    pause_text.set_text('')
+
+    # Reset pause state
+    pause_state['paused'] = False
 
     artists = [target_point, target_trail] + missile_points + missile_trails
-    artists += [status_text, missile_status_text, distance_text, flare_text, launcher_text]
-    artists += [intercept_text, restart_text, decoyed_text]
+    artists += [intercept_text, decoyed_text, pause_text]
     artists += distance_lines + altitude_lines
     return tuple(artists)
 
 
 def update(frame):
     """Update animation for given frame."""
+
+    # ========== CHECK FOR PAUSE STATE (Jet destroyed) ==========
+    jet_destroyed = any(intercepted)
+    current_time_sec = frame * dt
+
+    if jet_destroyed and not pause_state['paused']:
+        # Start pause
+        pause_state['paused'] = True
+        pause_state['pause_start_frame'] = frame
+
+    # Calculate pause countdown
+    pause_countdown = 0
+    if pause_state['paused']:
+        frames_since_pause = frame - pause_state['pause_start_frame']
+        time_paused = frames_since_pause * dt
+        pause_countdown = max(0, pause_state['pause_duration'] - time_paused)
+
+    # ========== UPDATE 3D POSITIONS ==========
     # Update aircraft position
     target_point.set_data([target_states[frame, 0]], [target_states[frame, 1]])
     target_point.set_3d_properties([target_states[frame, 2]])
+
+    # Change Jet marker if destroyed
+    if jet_destroyed:
+        target_point.set_marker('x')
+        target_point.set_color('red')
+        target_point.set_markersize(20)
+    else:
+        target_point.set_marker('*')
+        target_point.set_color('cyan')
+        target_point.set_markersize(15)
 
     # Update aircraft trail (with fade effect / max length)
     if TRAIL_FADE_EFFECT:
@@ -2129,14 +2210,14 @@ def update(frame):
     target_trail.set_data(target_states[trail_start:frame+1, 0], target_states[trail_start:frame+1, 1])
     target_trail.set_3d_properties(target_states[trail_start:frame+1, 2])
 
-    # Update all missiles
-    min_distance = float('inf')
+    # Calculate distances for each missile
+    missile_distances = []
     for m in range(num_missiles):
         # Update missile position
         missile_points[m].set_data([all_missile_states[m, frame, 0]], [all_missile_states[m, frame, 1]])
         missile_points[m].set_3d_properties([all_missile_states[m, frame, 2]])
 
-        # Update missile trail (with fade effect / max length)
+        # Update missile trail
         if TRAIL_FADE_EFFECT:
             trail_start = max(0, frame - TRAIL_MAX_LENGTH)
         else:
@@ -2144,127 +2225,141 @@ def update(frame):
         missile_trails[m].set_data(all_missile_states[m, trail_start:frame+1, 0], all_missile_states[m, trail_start:frame+1, 1])
         missile_trails[m].set_3d_properties(all_missile_states[m, trail_start:frame+1, 2])
 
-        # Track closest missile distance
+        # Calculate distance
         dist = np.linalg.norm(target_states[frame] - all_missile_states[m, frame])
-        if dist < min_distance:
-            min_distance = dist
+        missile_distances.append(dist)
 
-        # Update distance lines (missile to target)
+        # Update distance lines
         if SHOW_DISTANCE_LINES and m < len(distance_lines):
             m_pos = all_missile_states[m, frame]
             t_pos = target_states[frame]
             distance_lines[m].set_data([m_pos[0], t_pos[0]], [m_pos[1], t_pos[1]])
             distance_lines[m].set_3d_properties([m_pos[2], t_pos[2]])
 
-    # Update altitude lines (vertical lines to ground)
+    # Update altitude lines
     if SHOW_ALTITUDE_LINES and len(altitude_lines) > 0:
-        # Target altitude line
         t_pos = target_states[frame]
         altitude_lines[0].set_data([t_pos[0], t_pos[0]], [t_pos[1], t_pos[1]])
         altitude_lines[0].set_3d_properties([0, t_pos[2]])
-
-        # Missile altitude lines
         for m in range(num_missiles):
             if m + 1 < len(altitude_lines):
                 m_pos = all_missile_states[m, frame]
                 altitude_lines[m + 1].set_data([m_pos[0], m_pos[0]], [m_pos[1], m_pos[1]])
                 altitude_lines[m + 1].set_3d_properties([0, m_pos[2]])
 
-    # ========== TACTICAL HUD UPDATE ==========
-    # Determine which missile is active
-    active_missile = -1
-    for m in range(num_missiles):
-        if missile_launched[m] and not intercepted[m] and not missile_dead[m] and m not in decoyed_missiles:
-            active_missile = m
-            break
+    # ========== UPDATE STATUS PANEL ==========
+    # JET STATUS
+    if jet_destroyed:
+        status_texts['jet_status'].set_text('Status: DESTROYED')
+        status_texts['jet_status'].set_color('red')
+    else:
+        status_texts['jet_status'].set_text('Status: ACTIVE')
+        status_texts['jet_status'].set_color('#00ff00')
 
-    # Count missiles status
-    missiles_launched_count = sum(1 for m in range(num_missiles) if missile_launched[m])
-    missiles_decoyed_count = len([m for m in range(num_missiles) if m in decoyed_missiles])
+    # FLARE STATUS
+    if cm_system is not None:
+        flares_left = cm_system.flares_remaining
+        status_texts['jet_flare'].set_text(f'Flares: {flares_left}/{FLARE_COUNT}')
+        if flares_left == 0:
+            status_texts['jet_flare'].set_color('red')
+        else:
+            status_texts['jet_flare'].set_color('orange')
 
-    # Status text
+    # SAM STATUS UPDATES
+    sam_status_texts = [
+        (status_texts['sam1_status'], status_texts['sam1_dist'], 0),
+        (status_texts['sam2_status'], status_texts['sam2_dist'], 1),
+        (status_texts['sam3_status'], status_texts['sam3_dist'], 2),
+    ]
+
+    for status_t, dist_t, m in sam_status_texts:
+        if m >= num_missiles:
+            continue
+
+        dist = missile_distances[m] if m < len(missile_distances) else 0
+        dist_t.set_text(f'Distance: {dist:.0f}m')
+
+        if intercepted[m]:
+            status_t.set_text('Status: TARGET HIT!')
+            status_t.set_color('#00ff00')
+        elif m in decoyed_missiles:
+            status_t.set_text('Status: DECOYED')
+            status_t.set_color('orange')
+        elif missile_dead[m]:
+            status_t.set_text('Status: LOST')
+            status_t.set_color('red')
+        elif missile_launched[m]:
+            status_t.set_text('Status: INTERCEPTING')
+            status_t.set_color('yellow')
+        else:
+            # Check if this is the next missile to launch (sequential mode)
+            prev_failed = True
+            if SEQUENTIAL_LAUNCH and m > 0:
+                prev_m = m - 1
+                prev_failed = (missile_launched[prev_m] and
+                              (prev_m in decoyed_missiles or missile_dead[prev_m]) and
+                              not intercepted[prev_m])
+            if m == 0 or prev_failed:
+                status_t.set_text('Status: READY')
+                status_t.set_color('yellow')
+            else:
+                status_t.set_text('Status: STANDBY')
+                status_t.set_color('gray')
+
+    # MISSION STATUS
     all_missiles_done = all(
         missile_dead[m] or m in decoyed_missiles or intercepted[m]
         for m in range(num_missiles) if missile_launched[m]
     ) and all(missile_launched)
 
-    if active_missile >= 0:
-        missile_name = MISSILE_CONFIGS[active_missile].get("name", f"SAM-{active_missile+1}")
-        status_text.set_text(f'[*] {missile_name} TRACKING')
-    elif any(intercepted):
-        status_text.set_text('[OK] TARGET DESTROYED')
+    if jet_destroyed:
+        status_texts['mission_status'].set_text('TARGET DESTROYED!')
+        status_texts['mission_status'].set_color('#00ff00')
+        status_texts['mission_detail'].set_text(f'Pausing: {pause_countdown:.1f}s')
     elif all_missiles_done:
-        status_text.set_text('[X] AIRCRAFT ESCAPED!')
-
-    # Missile status
-    active_str = f"Active: {active_missile+1}" if active_missile >= 0 else "None"
-    missile_status_text.set_text(f'Missiles: {missiles_launched_count}/{num_missiles} | Decoyed: {missiles_decoyed_count}')
-
-    # Distance
-    distance_text.set_text(f'Distance: {min_distance:.0f}m')
-
-    # Flare status
-    if cm_system is not None:
-        flares_left = cm_system.flares_remaining
-        flare_text.set_text(f'FLARES: {flares_left}/{FLARE_COUNT}')
+        status_texts['mission_status'].set_text('MISSION FAILED')
+        status_texts['mission_status'].set_color('red')
+        status_texts['mission_detail'].set_text('Aircraft escaped!')
     else:
-        flare_text.set_text('')
+        status_texts['mission_status'].set_text('IN PROGRESS...')
+        status_texts['mission_status'].set_color('white')
+        active_count = sum(1 for m in range(num_missiles)
+                          if missile_launched[m] and not intercepted[m]
+                          and not missile_dead[m] and m not in decoyed_missiles)
+        status_texts['mission_detail'].set_text(f'Active missiles: {active_count}')
 
-    # Active launcher info
-    if active_missile >= 0:
-        pos = MISSILE_CONFIGS[active_missile]["start_pos"]
-        launcher_text.set_text(f'Launcher {active_missile+1}: ({pos[0]:.0f}, {pos[1]:.0f})')
-    else:
-        launcher_text.set_text('')
-
-    # Check for intercept and show notification
+    # ========== CENTER NOTIFICATIONS ==========
     intercept_msg = ''
-    restart_msg = ''
-
-    # Calculate restart frame window (RESTART_DELAY seconds after intercept)
-    # Using simulation time (frame * dt) for accurate countdown
-    intercept_found = False
-    for m in range(num_missiles):
-        if intercept_indices[m] is not None:
-            intercept_time_sec = intercept_indices[m] * dt
-            current_time_sec = frame * dt
-            time_since_intercept = current_time_sec - intercept_time_sec
-
-            # Show intercept message for RESTART_DELAY seconds
-            if frame >= intercept_indices[m] and time_since_intercept < RESTART_DELAY:
+    if jet_destroyed:
+        # Find which missile hit
+        for m in range(num_missiles):
+            if intercepted[m]:
                 missile_name = MISSILE_CONFIGS[m].get("name", f"SAM-{m+1}")
-                intercept_msg = f'*** INTERCEPT SUCCESS! ***\n{missile_name} HIT TARGET'
-                if AUTO_RESTART:
-                    countdown = max(0, RESTART_DELAY - time_since_intercept)
-                    restart_msg = f'Restarting in {countdown:.1f}s...'
-                intercept_found = True
+                intercept_msg = f'TARGET DESTROYED!\n{missile_name} HIT'
                 break
-
-    # Check if aircraft escaped (all missiles done, no intercept)
-    if not intercept_found and all_missiles_done and not any(intercepted):
-        intercept_msg = '*** MISSION FAILED ***\nAIRCRAFT ESCAPED!'
-
     intercept_text.set_text(intercept_msg)
-    restart_text.set_text(restart_msg)
 
-    # Check for decoyed missiles and show notification
+    # Pause countdown display
+    if pause_state['paused'] and pause_countdown > 0:
+        pause_text.set_text(f'SIMULATION PAUSED\nResuming in {pause_countdown:.1f}s')
+    else:
+        pause_text.set_text('')
+
+    # Decoyed notification
     decoyed_msg = ''
     if cm_system is not None:
-        current_time_sec = frame * dt
         for m in range(num_missiles):
             if m in cm_system.decoyed_times:
                 decoyed_time = cm_system.decoyed_times[m]
                 time_since_decoyed = current_time_sec - decoyed_time
-                # Show message for 3 seconds after decoy
                 if 0 <= time_since_decoyed < 3.0:
                     missile_name = MISSILE_CONFIGS[m].get("name", f"SAM-{m+1}")
-                    decoyed_msg = f'[DECOYED] {missile_name}\nHIT FLARE - EXPLODED!'
+                    decoyed_msg = f'{missile_name} DECOYED!\nHIT FLARE'
                     break
     decoyed_text.set_text(decoyed_msg)
 
     artists = [target_point, target_trail] + missile_points + missile_trails
-    artists += [status_text, missile_status_text, distance_text, flare_text, launcher_text]
-    artists += [intercept_text, restart_text, decoyed_text]
+    artists += [intercept_text, decoyed_text, pause_text]
     artists += distance_lines + altitude_lines
     return tuple(artists)
 
