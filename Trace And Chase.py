@@ -86,32 +86,38 @@ WEAVE_FREQUENCY = 0.3  # Hz
 WEAVE_AMPLITUDE = 400.0  # meters
 
 # ============================================================================
-# MULTI-MISSILE SETTINGS
+# MULTI-MISSILE SETTINGS (Heat-Seeker Configuration)
 # ============================================================================
 # Enable multiple missiles
 ENABLE_MULTI_MISSILE = True
 NUM_MISSILES = 3  # Number of missiles to launch
 
-# Missile launch configuration
-# Each missile can have: start_position, launch_time, guidance_algorithm
+# Sequential launch mode - launch next missile only if previous fails
+SEQUENTIAL_LAUNCH = True  # Launch one at a time, next only if previous fails
+
+# Missile launch configuration - Heat-Seeker missiles from different launchers
+# Heat-seekers use pure_pursuit (tracks heat signature directly)
 MISSILE_CONFIGS = [
     {
-        "start_pos": np.array([13000, 12000, 0]),
+        "start_pos": np.array([20000, 0, 500]),      # Launcher 1 - East
         "launch_time": 0.0,
-        "guidance": "proportional_navigation",
-        "color": "red"
+        "guidance": "pure_pursuit",  # Heat-seeker
+        "color": "red",
+        "name": "SAM-1"
     },
     {
-        "start_pos": np.array([15000, 8000, 2000]),
-        "launch_time": 2.0,
-        "guidance": "lead_pursuit",
-        "color": "orange"
+        "start_pos": np.array([0, 20000, 800]),      # Launcher 2 - North
+        "launch_time": 0.0,  # Will be set dynamically if SEQUENTIAL_LAUNCH
+        "guidance": "pure_pursuit",  # Heat-seeker
+        "color": "orange",
+        "name": "SAM-2"
     },
     {
-        "start_pos": np.array([10000, 15000, -1000]),
-        "launch_time": 4.0,
-        "guidance": "augmented_pn",
-        "color": "magenta"
+        "start_pos": np.array([-15000, 10000, 300]), # Launcher 3 - Northwest
+        "launch_time": 0.0,  # Will be set dynamically if SEQUENTIAL_LAUNCH
+        "guidance": "pure_pursuit",  # Heat-seeker
+        "color": "magenta",
+        "name": "SAM-3"
     },
 ]
 
@@ -125,44 +131,50 @@ SALVO_INTERVAL = 1.0  # seconds between each launch in salvo
 TARGET_ASSIGNMENT = "single"
 
 # ============================================================================
-# COUNTERMEASURES SETTINGS
+# AUTO-RESTART SETTINGS
+# ============================================================================
+AUTO_RESTART = True  # Automatically restart simulation after intercept
+RESTART_DELAY = 5.0  # Seconds to wait before restart
+
+# ============================================================================
+# COUNTERMEASURES SETTINGS (Heat-Seeker Defense)
 # ============================================================================
 # Enable countermeasures system
 ENABLE_COUNTERMEASURES = True
 
 # Countermeasure types:
 # - "flare"   : IR decoy - attracts heat-seeking missiles
-# - "chaff"   : Radar decoy - confuses radar-guided missiles
-# - "ecm"     : Electronic countermeasures - jams missile guidance
+# - "chaff"   : Radar decoy - NOT effective against heat-seekers
+# - "ecm"     : Electronic countermeasures - NOT effective against heat-seekers
 
-# Flare settings
+# Flare settings (PRIMARY defense against heat-seekers)
 ENABLE_FLARES = True
-FLARE_COUNT = 10  # Number of flares available
-FLARE_DEPLOY_DISTANCE = 3000.0  # Deploy when missile is this close (m)
-FLARE_DEPLOY_INTERVAL = 2.0  # Minimum time between flare deployments (s)
-FLARE_EFFECTIVENESS = 0.6  # Probability of successfully decoying missile (0-1)
+FLARE_COUNT = 2  # Aircraft has only 2 flares!
+FLARE_DEPLOY_DISTANCE = 4000.0  # Deploy when missile is this close (m)
+FLARE_DEPLOY_INTERVAL = 3.0  # Minimum time between flare deployments (s)
+FLARE_EFFECTIVENESS = 0.7  # 70% chance of successfully decoying heat-seeker
 FLARE_DURATION = 5.0  # How long flare remains effective (s)
 FLARE_FALL_RATE = 50.0  # How fast flare falls (m/s)
 
-# Chaff settings
-ENABLE_CHAFF = True
-CHAFF_COUNT = 8  # Number of chaff bundles available
-CHAFF_DEPLOY_DISTANCE = 4000.0  # Deploy distance
-CHAFF_DEPLOY_INTERVAL = 3.0  # Minimum time between chaff deployments
-CHAFF_EFFECTIVENESS = 0.5  # Probability of breaking radar lock
-CHAFF_CLOUD_RADIUS = 200.0  # Radius of chaff cloud (m)
-CHAFF_DURATION = 8.0  # How long chaff cloud remains effective (s)
+# Chaff settings - DISABLED for heat-seeker scenario
+ENABLE_CHAFF = False
+CHAFF_COUNT = 0
+CHAFF_DEPLOY_DISTANCE = 4000.0
+CHAFF_DEPLOY_INTERVAL = 3.0
+CHAFF_EFFECTIVENESS = 0.0  # Not effective against heat-seekers
+CHAFF_CLOUD_RADIUS = 200.0
+CHAFF_DURATION = 8.0
 
-# ECM (Electronic Countermeasures) settings
-ENABLE_ECM = True
-ECM_RANGE = 5000.0  # Effective range of ECM
-ECM_EFFECTIVENESS = 0.3  # Reduces missile accuracy by this factor
-ECM_GUIDANCE_NOISE = 0.1  # Adds noise to missile guidance (radians)
+# ECM settings - DISABLED for heat-seeker scenario
+ENABLE_ECM = False
+ECM_RANGE = 5000.0
+ECM_EFFECTIVENESS = 0.0  # Not effective against heat-seekers
+ECM_GUIDANCE_NOISE = 0.0
 
 # Countermeasure susceptibility by missile guidance type
-# Higher value = more susceptible to that countermeasure
+# Heat-seekers (pure_pursuit) are highly susceptible to flares
 CM_SUSCEPTIBILITY = {
-    "pure_pursuit": {"flare": 0.8, "chaff": 0.2, "ecm": 0.3},
+    "pure_pursuit": {"flare": 0.9, "chaff": 0.0, "ecm": 0.0},  # Heat-seeker
     "lead_pursuit": {"flare": 0.7, "chaff": 0.3, "ecm": 0.4},
     "proportional_navigation": {"flare": 0.5, "chaff": 0.5, "ecm": 0.5},
     "augmented_pn": {"flare": 0.4, "chaff": 0.4, "ecm": 0.6},
@@ -1730,6 +1742,20 @@ for i in range(1, n_points):
 
     # ========== MISSILES UPDATE ==========
     for m in range(num_missiles):
+        # Sequential launch logic - only launch next missile if previous failed
+        if SEQUENTIAL_LAUNCH and m > 0:
+            prev_m = m - 1
+            # Check if previous missile failed (decoyed or dead, but not intercepted)
+            prev_failed = (missile_launched[prev_m] and
+                          (prev_m in decoyed_missiles or missile_dead[prev_m]) and
+                          not intercepted[prev_m])
+            if not prev_failed:
+                # Previous missile still active or hasn't launched yet
+                all_missile_states[m, i] = all_missile_states[m, i-1] if i > 0 else MISSILE_CONFIGS[m]["start_pos"]
+                all_missile_velocities[m, i] = all_missile_velocities[m, 0]
+                all_missile_speeds[m, i] = miss_vel
+                continue
+
         # Get launch time for this missile
         if ENABLE_MULTI_MISSILE:
             launch_time = MISSILE_CONFIGS[m]["launch_time"]
@@ -1742,10 +1768,11 @@ for i in range(1, n_points):
         if t >= launch_time and not missile_launched[m]:
             missile_launched[m] = True
             missile_launch_indices[m] = i
+            missile_name = MISSILE_CONFIGS[m].get("name", f"Missile {m+1}") if ENABLE_MULTI_MISSILE else "Missile"
             if ENABLE_MULTI_MISSILE:
-                print(f"Missile {m+1} launched at t = {t:.2f}s")
+                print(f"🚀 {missile_name} LAUNCHED from Launcher {m+1}!")
             else:
-                print(f"Missile launched at t = {t:.2f}s")
+                print(f"🚀 Missile launched!")
 
         if missile_launched[m]:
             # Missile holds position after intercept or death
@@ -1910,12 +1937,9 @@ ax.set_box_aspect([1, 1, 1])
 ax.set_xlabel('X (m)')
 ax.set_ylabel('Y (m)')
 ax.set_zlabel('Z (m)')
-if ENABLE_MULTI_MISSILE:
-    ax.set_title(f'3D Missile-Aircraft Pursuit Simulation\n{num_missiles} Missiles')
-else:
-    ax.set_title(f'3D Missile-Aircraft Pursuit Simulation\nGuidance: {GUIDANCE_ALGORITHM.replace("_", " ").title()}')
+ax.set_title(f'🔥 HEAT-SEEKER INTERCEPT SIMULATION 🔥\n{num_missiles} SAM Launchers | Aircraft has {FLARE_COUNT} Flares')
 ax.grid(True)
-ax.view_init(elev=20, azim=45)
+ax.view_init(elev=25, azim=45)
 
 # Create animation artists
 target_point, = ax.plot([], [], [], 'bo', markersize=10, label='Aircraft')
@@ -1936,20 +1960,31 @@ for m in range(num_missiles):
     missile_points.append(point)
     missile_trails.append(trail)
 
-# HUD text
-time_text = ax.text2D(0.02, 0.95, '', transform=ax.transAxes, fontsize=12)
-speed_text = ax.text2D(0.02, 0.90, '', transform=ax.transAxes, fontsize=10)
-missile_speed_text = ax.text2D(0.02, 0.85, '', transform=ax.transAxes, fontsize=10, color='red')
-distance_text = ax.text2D(0.02, 0.80, '', transform=ax.transAxes, fontsize=10)
-algo_text = ax.text2D(0.02, 0.75, f'Missiles: {num_missiles}' if ENABLE_MULTI_MISSILE else f'Algorithm: {GUIDANCE_ALGORITHM}', transform=ax.transAxes, fontsize=10, color='purple')
-physics_text = ax.text2D(0.02, 0.70, f'Physics: {"ON" if ENABLE_PHYSICS else "OFF"}', transform=ax.transAxes, fontsize=10, color='green' if ENABLE_PHYSICS else 'gray')
-evasion_text = ax.text2D(0.02, 0.65, f'Evasion: {EVASION_PATTERN if ENABLE_EVASION else "OFF"}', transform=ax.transAxes, fontsize=10, color='orange' if ENABLE_EVASION else 'gray')
-cm_text = ax.text2D(0.02, 0.60, '', transform=ax.transAxes, fontsize=10, color='cyan') if ENABLE_COUNTERMEASURES else None
+# HUD text - No time display, focus on tactical info
+status_text = ax.text2D(0.02, 0.95, '', transform=ax.transAxes, fontsize=12, fontweight='bold')
+missile_status_text = ax.text2D(0.02, 0.88, '', transform=ax.transAxes, fontsize=10, color='red')
+distance_text = ax.text2D(0.02, 0.81, '', transform=ax.transAxes, fontsize=10)
+flare_text = ax.text2D(0.02, 0.74, '', transform=ax.transAxes, fontsize=11, color='orange', fontweight='bold')
+launcher_text = ax.text2D(0.02, 0.67, '', transform=ax.transAxes, fontsize=9, color='purple')
+
+# Keep these for compatibility but hide time
+time_text = ax.text2D(0.02, 0.60, '', transform=ax.transAxes, fontsize=1, alpha=0)  # Hidden
+speed_text = ax.text2D(0.02, 0.55, '', transform=ax.transAxes, fontsize=1, alpha=0)  # Hidden
+missile_speed_text = ax.text2D(0.02, 0.50, '', transform=ax.transAxes, fontsize=1, alpha=0)  # Hidden
+algo_text = ax.text2D(0.02, 0.45, '', transform=ax.transAxes, fontsize=1, alpha=0)  # Hidden
+physics_text = ax.text2D(0.02, 0.40, '', transform=ax.transAxes, fontsize=1, alpha=0)  # Hidden
+evasion_text = ax.text2D(0.02, 0.35, '', transform=ax.transAxes, fontsize=1, alpha=0)  # Hidden
+cm_text = None  # Disabled
 
 # Intercept notification text (large, centered)
 intercept_text = ax.text2D(0.5, 0.5, '', transform=ax.transAxes, fontsize=36,
                            color='red', fontweight='bold', ha='center', va='center',
                            bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.8))
+
+# Restart countdown text
+restart_text = ax.text2D(0.5, 0.35, '', transform=ax.transAxes, fontsize=18,
+                         color='white', ha='center', va='center',
+                         bbox=dict(boxstyle='round', facecolor='blue', alpha=0.7))
 
 # Starting position markers
 ax.scatter(target_states[0, 0], target_states[0, 1], target_states[0, 2],
@@ -2056,18 +2091,19 @@ def init():
             line.set_data([], [])
             line.set_3d_properties([])
 
-    time_text.set_text('')
-    speed_text.set_text('')
-    missile_speed_text.set_text('')
+    # Initialize HUD text
+    status_text.set_text('')
+    missile_status_text.set_text('')
     distance_text.set_text('')
+    flare_text.set_text('')
+    launcher_text.set_text('')
     intercept_text.set_text('')
-    if cm_text is not None:
-        cm_text.set_text('')
+    restart_text.set_text('')
 
-    artists = [target_point, target_trail] + missile_points + missile_trails + [time_text, speed_text, missile_speed_text, distance_text, intercept_text]
+    artists = [target_point, target_trail] + missile_points + missile_trails
+    artists += [status_text, missile_status_text, distance_text, flare_text, launcher_text]
+    artists += [intercept_text, restart_text]
     artists += distance_lines + altitude_lines
-    if cm_text is not None:
-        artists.append(cm_text)
     return tuple(artists)
 
 
@@ -2126,50 +2162,75 @@ def update(frame):
                 altitude_lines[m + 1].set_data([m_pos[0], m_pos[0]], [m_pos[1], m_pos[1]])
                 altitude_lines[m + 1].set_3d_properties([0, m_pos[2]])
 
-    # Calculate current target speed (for display)
-    if frame > 0:
-        dx = target_states[frame, 0] - target_states[frame-1, 0]
-        dy = target_states[frame, 1] - target_states[frame-1, 1]
-        dz = target_states[frame, 2] - target_states[frame-1, 2]
-        target_speed = np.sqrt(dx**2 + dy**2 + dz**2) / dt
+    # ========== TACTICAL HUD UPDATE ==========
+    # Determine which missile is active
+    active_missile = -1
+    for m in range(num_missiles):
+        if missile_launched[m] and not intercepted[m] and not missile_dead[m] and m not in decoyed_missiles:
+            active_missile = m
+            break
+
+    # Count missiles status
+    missiles_launched_count = sum(1 for m in range(num_missiles) if missile_launched[m])
+    missiles_decoyed_count = len([m for m in range(num_missiles) if m in decoyed_missiles])
+
+    # Status text
+    if active_missile >= 0:
+        missile_name = MISSILE_CONFIGS[active_missile].get("name", f"SAM-{active_missile+1}")
+        status_text.set_text(f'🎯 {missile_name} TRACKING')
+    elif any(intercepted):
+        status_text.set_text('✓ TARGET DESTROYED')
     else:
-        target_speed = targ_vel
+        status_text.set_text('⚠ ALL MISSILES EXPENDED')
 
-    # Get average missile speed (or first missile for single mode)
-    if ENABLE_MULTI_MISSILE:
-        avg_speed = np.mean([all_missile_speeds[m, frame] for m in range(num_missiles)])
-        missile_speed_str = f'Avg Missile Speed = {avg_speed:.1f} m/s'
+    # Missile status
+    active_str = f"Active: {active_missile+1}" if active_missile >= 0 else "None"
+    missile_status_text.set_text(f'Missiles: {missiles_launched_count}/{num_missiles} | Decoyed: {missiles_decoyed_count}')
+
+    # Distance
+    distance_text.set_text(f'Distance: {min_distance:.0f}m')
+
+    # Flare status
+    if cm_system is not None:
+        flares_left = cm_system.flares_remaining
+        flare_text.set_text(f'🔥 FLARES: {flares_left}/{FLARE_COUNT}')
     else:
-        missile_speed_str = f'Missile Speed = {all_missile_speeds[0, frame]:.1f} m/s'
+        flare_text.set_text('')
 
-    # Update text
-    time_text.set_text(f'Time = {times[frame]:.2f} s')
-    speed_text.set_text(f'Target Speed = {target_speed:.1f} m/s')
-    missile_speed_text.set_text(missile_speed_str)
-    distance_text.set_text(f'Closest = {min_distance:.1f} m')
-
-    # Update countermeasures status
-    if cm_text is not None and cm_system is not None:
-        cm_status = cm_system.get_status()
-        cm_text.set_text(f'CM: F={cm_status["flares"]} C={cm_status["chaff"]} D={cm_status["decoyed"]}')
+    # Active launcher info
+    if active_missile >= 0:
+        pos = MISSILE_CONFIGS[active_missile]["start_pos"]
+        launcher_text.set_text(f'Launcher {active_missile+1}: ({pos[0]:.0f}, {pos[1]:.0f})')
+    else:
+        launcher_text.set_text('')
 
     # Check for intercept and show notification
     intercept_msg = ''
+    restart_msg = ''
+
+    # Calculate restart frame window (RESTART_DELAY seconds after intercept)
+    # Using simulation time (frame * dt) for accurate countdown
     for m in range(num_missiles):
         if intercept_indices[m] is not None:
-            # Check if we just passed the intercept point
-            if frame >= intercept_indices[m] and frame < intercept_indices[m] + 200:
-                if ENABLE_MULTI_MISSILE:
-                    intercept_msg = f'💥 INTERCEPT! 💥\nMissile {m+1} hit at t={intercept_times[m]:.2f}s'
-                else:
-                    intercept_msg = f'💥 INTERCEPT! 💥\nt={intercept_times[m]:.2f}s'
+            intercept_time_sec = intercept_indices[m] * dt
+            current_time_sec = frame * dt
+            time_since_intercept = current_time_sec - intercept_time_sec
+
+            # Show intercept message for RESTART_DELAY seconds
+            if frame >= intercept_indices[m] and time_since_intercept < RESTART_DELAY:
+                missile_name = MISSILE_CONFIGS[m].get("name", f"SAM-{m+1}")
+                intercept_msg = f'💥 INTERCEPT SUCCESS! 💥\n{missile_name}'
+                if AUTO_RESTART:
+                    countdown = max(0, RESTART_DELAY - time_since_intercept)
+                    restart_msg = f'Restarting in {countdown:.1f}s...'
                 break
     intercept_text.set_text(intercept_msg)
+    restart_text.set_text(restart_msg)
 
-    artists = [target_point, target_trail] + missile_points + missile_trails + [time_text, speed_text, missile_speed_text, distance_text, intercept_text]
+    artists = [target_point, target_trail] + missile_points + missile_trails
+    artists += [status_text, missile_status_text, distance_text, flare_text, launcher_text]
+    artists += [intercept_text, restart_text]
     artists += distance_lines + altitude_lines
-    if cm_text is not None:
-        artists.append(cm_text)
     return tuple(artists)
 
 
