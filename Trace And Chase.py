@@ -255,7 +255,7 @@ Straight_time2 = 25     # Duration of second straight segment (s)
 targ_vel = 750          # Target velocity (m/s)
 miss_vel = 800          # missile velocity (m/s)
 turn_angle = -np.pi*4/3   # Turn angle in radians (np.pi = 180°, np.pi/2 = 90°, etc.)
-tmax = 75
+tmax = 120  # Increased to give missiles more time to intercept
 dt = 0.001
 animation_interval = 5  # milliseconds
 yz_angle = -np.pi/12
@@ -2191,18 +2191,34 @@ def init():
 def update(frame):
     """Update animation for given frame."""
 
-    # ========== CHECK FOR FREEZE STATE (Jet destroyed) ==========
+    # ========== CHECK FOR FREEZE STATE ==========
     jet_destroyed = any(intercepted)
 
-    # If jet is destroyed and we haven't frozen yet, freeze now
-    if jet_destroyed and pause_state['frozen_frame'] is None:
+    # Check if all missiles are done (decoyed, dead, or hit)
+    all_missiles_done = all(
+        missile_dead[m] or m in decoyed_missiles or intercepted[m]
+        for m in range(num_missiles) if missile_launched[m]
+    ) and all(missile_launched)
+
+    # Check if we've reached the last frame
+    max_frame = max(frames) if frames else len(times) - 1
+    reached_end = frame >= max_frame
+
+    # Freeze conditions:
+    # 1. Jet is destroyed
+    # 2. All missiles are done (but jet survived)
+    # 3. Reached end of simulation
+    should_freeze = jet_destroyed or all_missiles_done or reached_end
+
+    # If should freeze and we haven't frozen yet, freeze now
+    if should_freeze and pause_state['frozen_frame'] is None:
         pause_state['frozen_frame'] = frame
         pause_state['paused'] = True
         # Stop the animation
         if pause_state['anim_ref'] is not None:
             pause_state['anim_ref'].event_source.stop()
 
-    # Use frozen frame if jet is destroyed
+    # Use frozen frame if frozen
     display_frame = pause_state['frozen_frame'] if pause_state['frozen_frame'] is not None else frame
     current_time_sec = display_frame * dt
 
@@ -2326,17 +2342,21 @@ def update(frame):
                 status_t.set_text('Status: STANDBY')
                 status_t.set_color('gray')
 
-    # MISSION STATUS
-    all_missiles_done = all(
+    # MISSION STATUS (re-check all_missiles_done for display)
+    all_missiles_done_display = all(
         missile_dead[m] or m in decoyed_missiles or intercepted[m]
         for m in range(num_missiles) if missile_launched[m]
     ) and all(missile_launched)
+
+    # Check if simulation ended (reached last frame without jet destroyed)
+    max_frame_display = max(frames) if frames else len(times) - 1
+    simulation_ended = display_frame >= max_frame_display
 
     if jet_destroyed:
         status_texts['mission_status'].set_text('TARGET DESTROYED!')
         status_texts['mission_status'].set_color('#00ff00')
         status_texts['mission_detail'].set_text('Click NEXT SIMULATION')
-    elif all_missiles_done:
+    elif all_missiles_done_display or simulation_ended:
         status_texts['mission_status'].set_text('MISSION FAILED')
         status_texts['mission_status'].set_color('red')
         status_texts['mission_detail'].set_text('Aircraft escaped!')
@@ -2359,9 +2379,11 @@ def update(frame):
                 break
     intercept_text.set_text(intercept_msg)
 
-    # Freeze display when jet destroyed
+    # Freeze display when jet destroyed or mission failed
     if jet_destroyed:
         pause_text.set_text('SIMULATION FROZEN\nPress NEXT SIMULATION')
+    elif all_missiles_done_display or simulation_ended:
+        pause_text.set_text('MISSION FAILED\nPress NEXT SIMULATION')
     else:
         pause_text.set_text('')
 
